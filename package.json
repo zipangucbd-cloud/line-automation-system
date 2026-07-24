@@ -1,0 +1,33 @@
+{
+  "name": "line-automation-system",
+  "version": "1.0.0",
+  "description": "パートナー管理LINE自動化システ",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "NODE_EXTRA_CA_CERTS=/opt/homebrew/etc/ca-certificates/cert.pem node src/index.js",
+    "dev": "NODE_EXTRA_CA_CERTS=/opt/homebrew/etc/ca-certificates/cert.pem nodemon src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zipangucbd-cloud/line-automation-system.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/zipangucbd-cloud/line-automation-system/issues"
+  },
+  "homepage": "https://github.com/zipangucbd-cloud/line-automation-system#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@line/bot-sdk": "^11.1.0",
+    "axios": "^1.18.1",
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "node-telegram-bot-api": "^0.64.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
