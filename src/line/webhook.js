@@ -1,6 +1,10 @@
 const line = require('@line/bot-sdk');
+const fs = require('fs');
+const path = require('path');
 const config = require('../config');
 const approvalFlow = require('../telegram/approval');
+const { getBot } = require('../telegram/bot');
+const dbModule = require('../db/init');
 const logger = require('../utils/logger');
 
 const lineConfig = {
@@ -17,12 +21,16 @@ const blobClient = new line.messagingApi.MessagingApiBlobClient({
   channelAccessToken: lineConfig.channelAccessToken,
 });
 
+const greetingStep1 = fs.readFileSync(path.join(__dirname, '../knowledge/greeting_step1.txt'), 'utf8');
+const greetingStep2 = fs.readFileSync(path.join(__dirname, '../knowledge/greeting_step2.txt'), 'utf8');
+
 function setupLineWebhook(app) {
   app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
     try {
       const events = req.body.events || [];
       for (const event of events) {
         if (event.type === 'message' && event.message.type === 'text') await handleMessage(event);
+        else if (event.type === 'follow') await handleFollow(event);
       }
       res.status(200).send('OK');
     } catch (err) { logger.error('Webhook error:', err.message); res.status(500).send('Error'); }
@@ -39,6 +47,38 @@ async function handleMessage(event) {
     userName = profile.displayName;
   } catch (e) { logger.warn('Could not get profile:', e.message); }
   await approvalFlow.handleMessage({ userId, userName, messageText });
+}
+
+// 友だち追加(follow)で問診2通を自動送信(本番のあいさつメッセージ相当)
+async function handleFollow(event) {
+  const userId = event.source.userId;
+  let userName = '';
+  try {
+    const profile = await client.getProfile(userId);
+    userName = profile.displayName;
+  } catch (e) { logger.warn('Could not get profile:', e.message); }
+  const step1 = userName
+    ? greetingStep1.replace('{Nickname}', userName)
+    : greetingStep1.replace(/^\{Nickname\}様\n/, '');
+  const messages = [
+    { type: 'text', text: step1 },
+    { type: 'text', text: greetingStep2 },
+  ];
+  try {
+    await client.replyMessage({ replyToken: event.replyToken, messages });
+  } catch (err) {
+    logger.error('Greeting reply failed, fallback to push:', err.message);
+    try { await client.pushMessage({ to: userId, messages }); }
+    catch (e2) { logger.error('Greeting push failed:', e2.message); return; }
+  }
+  dbModule.saveConversation({ userId, direction: 'outgoing', content: step1 });
+  dbModule.saveConversation({ userId, direction: 'outgoing', content: greetingStep2 });
+  logger.info(`Greeting sent to new follower: ${userName || userId}`);
+  const bot = getBot();
+  if (bot && config.telegram.approvalChatId) {
+    try { await bot.sendMessage(config.telegram.approvalChatId, `👋 新規友だち追加: ${userName || userId}\n問診(2通)を自動送信しました`); }
+    catch (e) { logger.error('Telegram notify failed:', e.message); }
+  }
 }
 
 async function sendReply(userId, message) {
