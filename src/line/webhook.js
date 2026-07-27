@@ -26,17 +26,25 @@ const greetingStep2 = fs.readFileSync(path.join(__dirname, '../knowledge/greetin
 
 function setupLineWebhook(app) {
   // LINEのタイムアウト切断を防ぐため、即200を返して処理は非同期で行う
-  app.post('/webhook', line.middleware(lineConfig), (req, res) => {
-    const events = req.body.events || [];
-    res.status(200).send('OK');
-    for (const event of events) {
-      (async () => {
-        try {
-          if (event.type === 'message' && event.message.type === 'text') await handleMessage(event);
-          else if (event.type === 'follow') await handleFollow(event);
-        } catch (err) { logger.error('Webhook event error:', err.message); }
-      })();
-    }
+  app.post('/webhook',
+    (req, res, next) => { logger.info(`Webhook hit (len=${req.headers['content-length'] || '?'})`); next(); },
+    line.middleware(lineConfig),
+    (req, res) => {
+      const events = req.body.events || [];
+      logger.info(`Webhook events: ${events.length}`);
+      res.status(200).send('OK');
+      for (const event of events) {
+        (async () => {
+          try {
+            if (event.type === 'message' && event.message.type === 'text') await handleMessage(event);
+            else if (event.type === 'follow') await handleFollow(event);
+          } catch (err) { logger.error('Webhook event error:', err.message); }
+        })();
+      }
+    });
+  app.use('/webhook', (err, req, res, next) => {
+    logger.error(`Webhook middleware error: ${err.name}: ${err.message}`);
+    res.status(400).send('Bad Request');
   });
 }
 

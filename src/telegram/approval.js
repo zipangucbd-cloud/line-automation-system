@@ -1,5 +1,6 @@
 const { getBot } = require('./bot');
 const { generateReply } = require('../claude/client');
+const { buildWinnerContext } = require('../utils/winner_match');
 const config = require('../config');
 const logger = require('../utils/logger');
 const pendingApprovals = new Map();
@@ -10,12 +11,15 @@ async function handleMessage({ userId, userName, messageText }) {
   logger.info(`Processing message from ${userName}`);
   deps.saveConversation({ userId, direction: 'incoming', content: messageText });
   const customer = deps.getCustomer(userId);
+  let winnerInfo = null;
+  try { winnerInfo = buildWinnerContext({ deps, messageText, customer, userId }); if (winnerInfo) logger.info(`Winner match: ${winnerInfo.substring(0, 60)}`); }
+  catch (e) { logger.error('Winner match error:', e.message); }
   const history = deps.getRecentConversations(userId, 6).reverse().map(c => ({ role: c.direction === 'incoming' ? 'user' : 'assistant', content: c.content }));
   let reply;
-  try { reply = await generateReply({ userName, messageText, conversationHistory: history, customerData: customer }); }
+  try { reply = await generateReply({ userName, messageText, conversationHistory: history, customerData: customer, winnerInfo }); }
   catch (err) { logger.error('Reply generation failed:', err.message); return; }
   const id = Date.now().toString();
-  const p = { userId, userName, reply, messageText, customerData: customer, history, tgMsgId: null };
+  const p = { userId, userName, reply, messageText, customerData: customer, history, winnerInfo, tgMsgId: null };
   pendingApprovals.set(id, p);
   deps.saveApproval({ approvalId: id, userId, generatedReply: reply, status: 'pending' });
   await sendApproval(id, p, false);
@@ -47,7 +51,7 @@ async function handleRevisionRequest(msg) {
   logger.info(`Revision requested for #${approvalId}: ${feedback.substring(0, 80)}`);
   let newReply;
   try {
-    newReply = await generateReply({ userName: p.userName, messageText: p.messageText, conversationHistory: p.history, customerData: p.customerData, previousReply: p.reply, feedback });
+    newReply = await generateReply({ userName: p.userName, messageText: p.messageText, conversationHistory: p.history, customerData: p.customerData, winnerInfo: p.winnerInfo, previousReply: p.reply, feedback });
   } catch (err) {
     logger.error('Revision generation failed:', err.message);
     try { await bot.sendMessage(msg.chat.id, `❌ 再生成に失敗しました: ${err.message}`); } catch (e) {}
@@ -60,7 +64,7 @@ async function handleRevisionRequest(msg) {
   if (p.tgMsgId) {
     try { await bot.editMessageText(`✏️ 修正指示を反映 → 🔄 #${newId}\n\n指示: ${feedback}`, { chat_id: msg.chat.id, message_id: p.tgMsgId }); } catch (e) {}
   }
-  const np = { userId: p.userId, userName: p.userName, reply: newReply, messageText: p.messageText, customerData: p.customerData, history: p.history, tgMsgId: null };
+  const np = { userId: p.userId, userName: p.userName, reply: newReply, messageText: p.messageText, customerData: p.customerData, history: p.history, winnerInfo: p.winnerInfo, tgMsgId: null };
   pendingApprovals.set(newId, np);
   deps.saveApproval({ approvalId: newId, userId: p.userId, generatedReply: newReply, status: 'pending' });
   await sendApproval(newId, np, true);

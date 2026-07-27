@@ -6,10 +6,11 @@ const logger = require('../utils/logger');
 const client = new Anthropic({ apiKey: config.claude.apiKey });
 const systemPromptPath = path.join(__dirname, '../knowledge/system_prompt.md');
 const systemPrompt = fs.existsSync(systemPromptPath) ? fs.readFileSync(systemPromptPath, 'utf-8') : 'あなたはSEXTASY VIP ROOMの応対AIです。丁寧なフォーマル敬語で応対してください。';
-async function generateReply({ userName, messageText, conversationHistory = [], customerData = null, previousReply = null, feedback = null }) {
+async function generateReply({ userName, messageText, conversationHistory = [], customerData = null, winnerInfo = null, previousReply = null, feedback = null }) {
   try {
     let contextInfo = '';
-    if (customerData) contextInfo = `\n\n【顧客カルテ】\n${JSON.stringify(customerData, null, 2)}\n`;
+    if (customerData) contextInfo += `\n\n【顧客カルテ】\n${JSON.stringify(customerData, null, 2)}\n`;
+    if (winnerInfo) contextInfo += `\n\n【当選者照合】\n${winnerInfo}\n`;
     const messages = [];
     for (const msg of conversationHistory) messages.push({ role: msg.role, content: msg.content });
     messages.push({ role: 'user', content: `【${userName}様からのメッセージ】\n${messageText}${contextInfo}` });

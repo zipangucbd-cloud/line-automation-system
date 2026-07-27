@@ -15,7 +15,11 @@ async function main() {
     saveApproval: dbModule.saveApproval,
     updateApproval: dbModule.updateApproval,
     getCustomer: dbModule.getCustomer,
+    upsertCustomer: dbModule.upsertCustomer,
     getRecentConversations: dbModule.getRecentConversations,
+    findWinnerByXid: dbModule.findWinnerByXid,
+    findWinnerByLineUser: dbModule.findWinnerByLineUser,
+    linkWinnerToLine: dbModule.linkWinnerToLine,
   });
   const app = express();
   setupLineWebhook(app);
