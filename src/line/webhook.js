@@ -25,15 +25,18 @@ const greetingStep1 = fs.readFileSync(path.join(__dirname, '../knowledge/greetin
 const greetingStep2 = fs.readFileSync(path.join(__dirname, '../knowledge/greeting_step2.txt'), 'utf8');
 
 function setupLineWebhook(app) {
-  app.post('/webhook', line.middleware(lineConfig), async (req, res) => {
-    try {
-      const events = req.body.events || [];
-      for (const event of events) {
-        if (event.type === 'message' && event.message.type === 'text') await handleMessage(event);
-        else if (event.type === 'follow') await handleFollow(event);
-      }
-      res.status(200).send('OK');
-    } catch (err) { logger.error('Webhook error:', err.message); res.status(500).send('Error'); }
+  // LINEのタイムアウト切断を防ぐため、即200を返して処理は非同期で行う
+  app.post('/webhook', line.middleware(lineConfig), (req, res) => {
+    const events = req.body.events || [];
+    res.status(200).send('OK');
+    for (const event of events) {
+      (async () => {
+        try {
+          if (event.type === 'message' && event.message.type === 'text') await handleMessage(event);
+          else if (event.type === 'follow') await handleFollow(event);
+        } catch (err) { logger.error('Webhook event error:', err.message); }
+      })();
+    }
   });
 }
 
