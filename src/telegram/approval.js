@@ -17,7 +17,15 @@ async function handleMessage({ userId, userName, messageText }) {
   const history = deps.getRecentConversations(userId, 6).reverse().map(c => ({ role: c.direction === 'incoming' ? 'user' : 'assistant', content: c.content }));
   let reply;
   try { reply = await generateReply({ userName, messageText, conversationHistory: history, customerData: customer, winnerInfo }); }
-  catch (err) { logger.error('Reply generation failed:', err.message); return; }
+  catch (err) {
+    logger.error('Reply generation failed:', err.message);
+    const bot = getBot();
+    if (bot && config.telegram.approvalChatId) {
+      const trunc = messageText.length > 200 ? messageText.substring(0, 200) + '...' : messageText;
+      try { await bot.sendMessage(config.telegram.approvalChatId, `⚠️ 返信生成に失敗しました。chat.line.bizで手動対応してください。\n\n👤 ${userName}様:\n${trunc}\n\nエラー: ${err.message}`); } catch (e) {}
+    }
+    return;
+  }
   const id = Date.now().toString();
   const p = { userId, userName, reply, messageText, customerData: customer, history, winnerInfo, tgMsgId: null };
   pendingApprovals.set(id, p);
