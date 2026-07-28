@@ -24,12 +24,23 @@ function initDb() {
       line_user_id TEXT,
       chosen_product TEXT,
       notes TEXT,
+      shipped_at DATETIME,
+      arrived_at DATETIME,
+      review_due DATE,
+      reviewed_at DATETIME,
+      last_followup_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_winners_xid ON winners(x_id);
     CREATE INDEX IF NOT EXISTS idx_winners_line ON winners(line_user_id);
   `);
+  // 既存DBへのカラム追加マイグレーション
+  const wcols = db.prepare('PRAGMA table_info(winners)').all().map(c => c.name);
+  const addCols = [['shipped_at', 'DATETIME'], ['arrived_at', 'DATETIME'], ['review_due', 'DATE'], ['reviewed_at', 'DATETIME'], ['last_followup_at', 'DATETIME']];
+  for (const [name, type] of addCols) {
+    if (!wcols.includes(name)) db.exec(`ALTER TABLE winners ADD COLUMN ${name} ${type}`);
+  }
   logger.info(`Database initialized at ${dbPath}`);
 }
 function getCustomer(userId) { return db.prepare('SELECT * FROM customers WHERE user_id = ?').get(userId); }

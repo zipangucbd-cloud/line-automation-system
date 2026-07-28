@@ -77,6 +77,23 @@ async function handleRevisionRequest(msg) {
   deps.saveApproval({ approvalId: newId, userId: p.userId, generatedReply: newReply, status: 'pending' });
   await sendApproval(newId, np, true);
 }
+// フォローアップ提案(followup_check.js等の外部トリガーから): 承認ボタン付きでTelegramに提示し、承認でLINE送信
+let fuCounter = 0;
+async function proposeFollowup({ userId, userName, text, label }) {
+  const id = `fu${Date.now()}${fuCounter++}`;
+  const p = { userId, userName: userName || '(不明)', reply: text, messageText: `(フォローアップ提案: ${label})`, customerData: null, history: [], winnerInfo: null, tgMsgId: null };
+  pendingApprovals.set(id, p);
+  deps.saveApproval({ approvalId: id, userId, generatedReply: text, status: 'pending' });
+  const bot = getBot();
+  if (!bot || !config.telegram.approvalChatId) return false;
+  const msg = `📋 フォローアップ提案 #${id}\n\n👤 ${p.userName} — ${label}\n\n📝 送信文面:\n${text}\n\n━━━━━━━━━━\n✅で送信 / ✏️修正はこのメッセージに返信で指示`;
+  const opts = { reply_markup: { inline_keyboard: [[{ text: '✅ 承認して送信', callback_data: `a:${id}` }, { text: '❌ 見送り', callback_data: `r:${id}` }]] } };
+  try {
+    const sent = await bot.sendMessage(config.telegram.approvalChatId, msg, opts);
+    if (sent && sent.message_id) { p.tgMsgId = sent.message_id; tgMsgToApproval.set(sent.message_id, id); }
+    return true;
+  } catch (e) { logger.error('Followup propose failed:', e.message); return false; }
+}
 function setupCallbacks() {
   const bot = getBot(); if (!bot) return;
   bot.on('message', async (msg) => {
@@ -107,4 +124,4 @@ function setupCallbacks() {
     }
   });
 }
-module.exports = { setup, handleMessage };
+module.exports = { setup, handleMessage, proposeFollowup };

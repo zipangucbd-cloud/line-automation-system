@@ -25,6 +25,15 @@ async function main() {
   setupLineWebhook(app);
   app.get('/', (req, res) => res.send('LINE Bot Server is running'));
   app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+  // フォローアップ提案の内部エンドポイント(localhost限定。followup_check.jsから呼ばれる)
+  app.post('/internal/propose', express.json(), async (req, res) => {
+    const ip = req.socket.remoteAddress;
+    if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') return res.status(403).send('Forbidden');
+    const { userId, userName, text, label } = req.body || {};
+    if (!userId || !text) return res.status(400).json({ ok: false, error: 'userId and text required' });
+    const ok = await approvalFlow.proposeFollowup({ userId, userName, text, label: label || 'フォローアップ' });
+    res.json({ ok });
+  });
   const port = process.env.PORT || 3000;
   app.listen(port, () => { logger.info(`Server on port ${port}`); logger.info('Ready'); });
 }
