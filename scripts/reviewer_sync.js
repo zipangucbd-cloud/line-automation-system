@@ -129,8 +129,25 @@ function classify(p, v) {
   return null;
 }
 
+// ネットワークの一時的な失敗で週次ジョブが落ちないようにリトライする
+async function fetchRetry(url, opts = {}, tries = 4) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, opts);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r;
+    } catch (e) {
+      lastErr = e;
+      console.error(`fetch retry ${i + 1}/${tries}: ${e.message}`);
+      await sleep(5000 * (i + 1));
+    }
+  }
+  throw lastErr;
+}
+
 (async () => {
-  const res = await fetch(XLSX_URL, { redirect: 'follow' });
+  const res = await fetchRetry(XLSX_URL, { redirect: 'follow' });
   const buf = Buffer.from(await res.arrayBuffer());
   const book = parseXlsx(buf);
   const K = book.rows('ギフ回数');
