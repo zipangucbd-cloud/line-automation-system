@@ -257,7 +257,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
 
   console.log(`parsed: ${people.size} unique people`);
   const stats = { fol: 0, sb: 0, ch: 0, dates: 0 };
-  for (const p of people.values()) { if (p.fol) stats.fol++; if (p.sb) stats.sb++; if (p.channel) stats.ch++; if (p.dates.length) stats.dates++; }
+  for (const p of people.values()) { if (p.fol) stats.fol++; if (p.sb) stats.sb++; if (p.channel) stats.ch++; if (p.blockDates.filter(Boolean).length || p.giftDates.length) stats.dates++; }
   console.log(`coverage: channel=${stats.ch}, shadowban=${stats.sb}, follower=${stats.fol}, dates=${stats.dates}`);
 
   // ===== Notion upsert =====
