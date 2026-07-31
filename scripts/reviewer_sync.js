@@ -155,7 +155,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
   const now = Date.now();
   const people = new Map();
   const get = (xid) => {
-    if (!people.has(xid)) people.set(xid, { name: '', fullname: '', note: '', channel: '', evals: [], history: [], blockDates: [], giftDates: [], given: 0, reviewed: 0, fol: '', sb: '', face: '', speed: '', tokki: '', genre: '', buri: '', sai: '', caution: false, cautionWhy: [], fromKaisu: false, prods: new Set() });
+    if (!people.has(xid)) people.set(xid, { name: '', fullname: '', note: '', channel: '', evals: [], history: [], blockDates: [], giftDates: [], given: 0, reviewed: 0, fol: '', sb: '', face: '', speed: '', tokki: '', genre: '', buri: '', sai: '', caution: false, cautionWhy: [], fromKaisu: false, reviewedInGift: false, posInGift: false, evalBlank: false, postTrace: false, shippedLongAgo: false, prods: new Set() });
     return people.get(xid);
   };
   const chFromNote = (p, note) => {
@@ -217,9 +217,9 @@ async function fetchRetry(url, opts = {}, tries = 4) {
 
   // ===== ギフティング(補完) =====
   const GB = [
-    { id: 2, name: 1, fullname: 3, note: 4, ship: 11, shipdate: 12, review: 15, ev: 22, buri: 18, sai: 19, genre: 21 },
-    { id: 26, name: 25, fullname: 27, note: 28, ship: 35, shipdate: 36, review: 39, ev: 46, buri: 42, sai: 43, genre: 45 },
-    { id: 50, name: 49, fullname: 51, note: 52, ship: 58, shipdate: 59, review: 61, ev: 68, buri: 64, sai: 65, genre: 67 },
+    { id: 2, name: 1, fullname: 3, note: 4, ship: 11, shipdate: 12, review: 15, ev: 22, buri: 18, sai: 19, genre: 21, imp: 17, speed: 16 },
+    { id: 26, name: 25, fullname: 27, note: 28, ship: 35, shipdate: 36, review: 39, ev: 46, buri: 42, sai: 43, genre: 45, imp: 41, speed: 40 },
+    { id: 50, name: 49, fullname: 51, note: 52, ship: 58, shipdate: 59, review: 61, ev: 68, buri: 64, sai: 65, genre: 67, imp: 63, speed: 62 },
   ];
   for (let i = 2; i < G.length; i++) {
     const r = G[i];
@@ -238,22 +238,40 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       const sa = cell(r, b.sai); if (sa === '済') p.sai = '済'; else if (sa === '未' && p.sai !== '済') p.sai = '未';
       if (bu === '✖' || bu === '投稿削除') { p.caution = true; p.cautionWhy.push('ブリ' + bu); }
       if (!p.fromKaisu) {
+        // ギフ回数シートに載っていない = 一度もレビュー投稿していない人(大塚さん確認済みのシート定義)
         const shipped = cell(r, b.ship) === '済' || !!cell(r, b.shipdate);
         let ev = cell(r, b.ev);
         if (ev && !EVALS.has(ev)) { classify(p, ev); ev = ''; }
         if (shipped) p.given++;
-        if (cell(r, b.review) === '済') p.reviewed++;
+        if (cell(r, b.review) === '済') {
+          p.reviewed++;
+          p.reviewedInGift = true;
+          if (ev && POS.has(ev)) p.posInGift = true; // ポジ評価なのにギフ回数に不在 → 転記漏れ疑い
+          // レビュー済だが評価未記入 → 判断不能。投稿の痕跡(インプ/投稿スピード)があれば予備軍として残す
+          if (!ev) { p.evalBlank = true; if (cell(r, b.imp) || cell(r, b.speed)) p.postTrace = true; }
+        }
         if (ev) p.evals.push(ev);
         products(note).forEach((x) => p.prods.add(x));
         if (note && !p.note) p.note = note;
         if (/凍結/.test(note)) { p.caution = true; p.cautionWhy.push('凍結'); }
-        if (shipped && cell(r, b.review) !== '済' && iso && now - new Date(iso + 'T00:00:00+09:00').getTime() > 60 * 86400000) { p.caution = true; p.cautionWhy.push('レビュー未60日+'); }
+        // 発送済み × レビュー実績なし × 提供から60日超(レビュー期限2ヶ月を過ぎている) → 要注意
+        if (shipped && iso && now - new Date(iso + 'T00:00:00+09:00').getTime() > 60 * 86400000) p.shippedLongAgo = true;
       }
     }
   }
 
   // チャネル未確定でギフ経路情報が全く無い人 → X DM とみなす(公式LINE誘導に乗った人は備考に記録される運用のため)
-  for (const p of people.values()) if (!p.channel) p.channel = 'X DM';
+  for (const p of people.values()) {
+    if (!p.channel) p.channel = 'X DM';
+    // ポジ実績 = ギフ回数シートに在籍(このシートはポジティブレビューをくれた人だけを載せる運用)
+    p.posRecord = p.fromKaisu;
+    // 転記漏れ疑い = ギフ回数に不在だが、ギフティング側でレビュー済かつ評価がポジティブ
+    p.transferMiss = !p.fromKaisu && !!p.posInGift;
+    // 要注意 = 提供済みなのにレビュー記録が一切なく、提供から60日(レビュー期限2ヶ月)を過ぎている
+    if (!p.fromKaisu && !p.reviewedInGift && p.shippedLongAgo) { p.caution = true; p.cautionWhy.unshift('レビュー実績なし(提供済)'); }
+    // 評価未記入でギフ回数にも不在 = 品質不明。将来の掘り起こし予備軍として印を残す
+    if (!p.fromKaisu && p.evalBlank && !p.posInGift) p.cautionWhy.push(p.postTrace ? '評価未記入(投稿痕跡あり)' : '評価未記入');
+  }
 
   console.log(`parsed: ${people.size} unique people`);
   const stats = { fol: 0, sb: 0, ch: 0, dates: 0 };
@@ -286,7 +304,9 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       'レビュー済回数': { number: p.reviewed },
       'ポジ回数': { number: pos },
       'ネガ回数': { number: neg },
-      'オールポジ': { checkbox: p.evals.length > 0 && neg === 0 },
+      'オールポジ': { checkbox: (p.fromKaisu || p.evals.length > 0) && neg === 0 },
+      'ポジ実績': { checkbox: !!p.posRecord },
+      '転記漏れ疑い': { checkbox: !!p.transferMiss },
       '要注意': { checkbox: p.caution },
     };
     if (p.prods.size) props['提供商品'] = { multi_select: [...p.prods].map((n) => ({ name: n })) };
@@ -306,7 +326,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       '氏名': txt(p.fullname), '備考': txt(p.note), '特記': txt(tokki),
       'チャネル': sel(p.channel), 'フォロワー帯': sel(/以下|以上|万垢/.test(p.fol) ? p.fol : ''),
       'シャドバン': sel(p.sb), '顔出し': sel(p.face), 'ジャンル': sel(p.genre),
-      'ブリ': sel(p.buri), '再提供': sel(p.sai), '投稿スピード': sel(p.speed),
+      '再提供': sel(p.sai), '投稿スピード': sel(p.speed),
     };
     for (const [k, v] of Object.entries(opt)) if (v) props[k] = v;
     try {
