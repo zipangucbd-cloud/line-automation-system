@@ -72,16 +72,25 @@ async function flushInbox(userId) {
 }
 
 // 「覚えて」「覚えて:」「/覚えて」+ 改行やスペース区切りのいずれでも知識追加として受け付ける
-const LEARN_RE = /^\s*\/?\s*(?:覚えて|おぼえて|学習|記憶|remember)\s*[:：]?\s*([\s\S]+)$/;
+const LEARN_RE = /^\s*(?:覚えて|おぼえて|学習|記憶|remember)\s*[:：]?\s*([\s\S]+)$/;
 
 // 運営がTelegramで教えた知識を learned.md に追記する(生成のたびに読み直されて反映される)
 const LEARNED_PATH = path.join(__dirname, '../knowledge/learned.md');
 function saveLearned(text) {
   try {
+    const body = String(text).replace(/\n+/g, ' ').trim();
+    if (!body) return false;
+    // 同一内容が既にある場合は追記しない(ハンドラの重複発火などによる二重登録を防ぐ)
+    if (fs.existsSync(LEARNED_PATH)) {
+      const existing = fs.readFileSync(LEARNED_PATH, 'utf-8');
+      if (existing.split('\n').some((l) => l.replace(/^-\s*\[[^\]]*\]\s*/, '').trim() === body)) {
+        logger.info('Learned (duplicate, skipped)');
+        return true;
+      }
+    }
     const stamp = new Date().toISOString().slice(0, 10);
-    const line = `- [${stamp}] ${String(text).replace(/\n+/g, ' ').trim()}\n`;
-    fs.appendFileSync(LEARNED_PATH, line, 'utf-8');
-    logger.info(`Learned: ${text.substring(0, 80)}`);
+    fs.appendFileSync(LEARNED_PATH, `- [${stamp}] ${body}\n`, 'utf-8');
+    logger.info(`Learned: ${body.substring(0, 80)}`);
     return true;
   } catch (e) { logger.error('Save learned failed:', e.message); return false; }
 }
@@ -202,6 +211,8 @@ function setupCallbacks() {
     try {
       if (!msg.text) return;
       if (!config.telegram.approvalChatId || String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+      // /で始まるものは専用のコマンドハンドラが処理するため、ここでは扱わない(二重処理の防止)
+      if (/^\s*\//.test(msg.text)) return;
 
       // 承認依頼への返信でなくても、「覚えて」単独で知識を追加できる(コロン・改行どちらでも可)
       // ※グループではTelegramのプライバシーモードにより届かない場合があるため /覚えて も用意している
