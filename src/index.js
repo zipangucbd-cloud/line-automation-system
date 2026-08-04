@@ -16,6 +16,7 @@ async function main() {
     updateApproval: dbModule.updateApproval,
     getCustomer: dbModule.getCustomer,
     upsertCustomer: dbModule.upsertCustomer,
+    saveKnowledgeGap: dbModule.saveKnowledgeGap,
     getRecentConversations: dbModule.getRecentConversations,
     findWinnerByXid: dbModule.findWinnerByXid,
     findWinnerByLineUser: dbModule.findWinnerByLineUser,

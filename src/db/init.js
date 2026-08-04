@@ -34,6 +34,7 @@ function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_winners_xid ON winners(x_id);
     CREATE INDEX IF NOT EXISTS idx_winners_line ON winners(line_user_id);
+    CREATE TABLE IF NOT EXISTS knowledge_gaps (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, gap TEXT, approval_id TEXT, resolved INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
   `);
   // 既存DBへのカラム追加マイグレーション
   const wcols = db.prepare('PRAGMA table_info(winners)').all().map(c => c.name);
@@ -61,4 +62,6 @@ function findWinnerByLineUser(lineUserId) { return db.prepare('SELECT * FROM win
 function linkWinnerToLine({ winnerId, lineUserId }) {
   db.prepare(`UPDATE winners SET line_user_id = ?, status = CASE WHEN status = 'pending' THEN 'contacted' ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(lineUserId, winnerId);
 }
-module.exports = { initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+function saveKnowledgeGap({ userId, gap, approvalId }) { db.prepare('INSERT INTO knowledge_gaps (user_id, gap, approval_id) VALUES (?, ?, ?)').run(userId, gap, approvalId); }
+function listKnowledgeGaps() { return db.prepare('SELECT * FROM knowledge_gaps WHERE resolved = 0 ORDER BY created_at DESC').all(); }
+module.exports = { saveKnowledgeGap, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };

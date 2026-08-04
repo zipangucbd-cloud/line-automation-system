@@ -65,14 +65,31 @@ async function flushInbox(userId) {
   const p = { userId, userName, reply, stage, messageText, customerData: customer, history, winnerInfo, images, tgMsgId: null };
   pendingApprovals.set(id, p);
   deps.saveApproval({ approvalId: id, userId, generatedReply: reply, status: 'pending' });
+  recordGaps({ userId, reply, approvalId: id });
   await sendApproval(id, p, false);
+}
+
+// 返信案に含まれる [知識不足: ...] を拾ってDBに残す。運営が知識を足して再生成するための記録。
+function recordGaps({ userId, reply, approvalId }) {
+  try {
+    const found = [...String(reply).matchAll(/\[知識不足:\s*([^\]]+)\]/g)].map((m) => m[1].trim());
+    for (const gap of found) {
+      deps.saveKnowledgeGap({ userId, gap, approvalId });
+      logger.warn(`Knowledge gap: ${gap}`);
+    }
+    return found;
+  } catch (e) { logger.error('Gap record failed:', e.message); return []; }
 }
 async function sendApproval(id, p, isRevision) {
   const bot = getBot();
   if (!bot || !config.telegram.approvalChatId) return;
   const trunc = p.messageText.length > 500 ? p.messageText.substring(0, 500) + '...' : p.messageText;
   const head = (isRevision ? `🔄 修正版 承認依頼 #${id}` : `🤖 承認依頼 #${id}`) + (p.stage ? `  [${p.stage}]` : '');
-  const text = `${head}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}\n\n━━━━━━━━━━\n✏️ 修正したい場合：このメッセージに「返信」で指示を送ると再生成します`;
+  const gaps = [...String(p.reply).matchAll(/\[知識不足:\s*([^\]]+)\]/g)].map((m) => m[1].trim());
+  const alert = gaps.length
+    ? `\n\n🚨 このまま送らないでください — Botに以下の知識がありません:\n${gaps.map((g) => `・${g}`).join('\n')}\n(Claudeに教えて知識を追加してから、✏️返信で再生成してください)`
+    : '';
+  const text = `${head}${alert}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}\n\n━━━━━━━━━━\n✏️ 修正したい場合：このメッセージに「返信」で指示を送ると再生成します`;
   const opts = { reply_markup: { inline_keyboard: [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]] } };
   try {
     const sent = await bot.sendMessage(config.telegram.approvalChatId, text, opts);
