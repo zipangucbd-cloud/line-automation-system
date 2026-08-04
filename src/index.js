@@ -17,6 +17,8 @@ async function main() {
     getCustomer: dbModule.getCustomer,
     upsertCustomer: dbModule.upsertCustomer,
     saveKnowledgeGap: dbModule.saveKnowledgeGap,
+    addWinner: dbModule.addWinner,
+    listActiveWinners: dbModule.listActiveWinners,
     linkTelegramMessage: dbModule.linkTelegramMessage,
     findApprovalByTgMsg: dbModule.findApprovalByTgMsg,
     getLastIncoming: dbModule.getLastIncoming,

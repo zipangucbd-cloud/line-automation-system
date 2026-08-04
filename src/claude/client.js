@@ -91,4 +91,39 @@ async function generateReply({ userName, messageText, conversationHistory = [], 
     throw err;
   }
 }
-module.exports = { generateReply };
+// スタッフがTelegramに貼った当選者リストを解釈して構造化する
+// 書式を覚えてもらう必要がないよう、自由な書き方を許容する
+async function parseWinners(text) {
+  const prompt = `次のテキストは、SEXTASYのレビュアー企画の当選者リストです。1人ずつ構造化してJSONで返してください。
+
+【抽出ルール】
+- x_id: XのユーザーID(@は除く)。半角英数字とアンダースコアのみ
+- campaign: 企画名や弾数(例「35弾」「7月グミクリーム選択企画」)。全員共通の記述が先頭行にあればそれを全員に適用する
+- offer: 提供内容を次のいずれかに正規化する
+    original_2粒 … グミ / オリジナル / ORIGINAL
+    cream … クリーム / CREAM
+    drop … ドロップ / DROP
+    choice … グミかクリームを本人に選ばせる場合(「選択」「どちらか」等)
+    free … 送料も無料の完全無料提供
+  判断できない場合は unknown
+- tier: 「強」「強アカ」「フォロワー◯万」「提携」「アフィ」等の記述があれば strong、なければ normal
+- notes: フォロワー数など補足があれば入れる(なければ空文字)
+
+【出力形式】
+JSONのみを出力してください。説明文は不要です。
+{"winners":[{"x_id":"abc123","campaign":"35弾","offer":"cream","tier":"normal","notes":""}],"warnings":["曖昧だった点があれば日本語で"]}
+
+【入力】
+${text}`;
+  const response = await client.messages.create({
+    model: config.claude.model,
+    max_tokens: 4096,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  const raw = response.content[0].text.trim();
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error('解析結果を読み取れませんでした');
+  return JSON.parse(m[0]);
+}
+
+module.exports = { generateReply, parseWinners };

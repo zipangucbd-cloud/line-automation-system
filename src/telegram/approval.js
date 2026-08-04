@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getBot } = require('./bot');
-const { generateReply } = require('../claude/client');
+const { generateReply, parseWinners } = require('../claude/client');
 const { buildWinnerContext } = require('../utils/winner_match');
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -281,6 +281,51 @@ function setupCallbacks() {
   });
 
   // スタッフ向けの使い方ガイド(グループにピン留めしておく想定)
+  // 当選者リストの登録: スタッフが自由な書き方で貼ったものをClaudeが解釈して登録する
+  const OFFER_LABEL = { original_2粒: 'グミ(ORIGINAL)', cream: 'クリーム(CREAM)', drop: 'DROP', choice: 'グミorクリーム選択', free: '完全無料', unknown: '要確認' };
+  bot.onText(/^\/(当選者?|winners?)(?:@\S+)?(?:\s|\n)([\s\S]+)$/, async (msg, match) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    const who = msg.from ? (msg.from.first_name || msg.from.username || '担当者') : '担当者';
+    let parsed;
+    try {
+      await bot.sendMessage(msg.chat.id, '📋 当選者リストを読み取っています…');
+      parsed = await parseWinners(match[2]);
+    } catch (e) {
+      logger.error('Winner parse failed:', e.message);
+      await bot.sendMessage(msg.chat.id, `⚠️ 読み取りに失敗しました: ${e.message}\n\n書き方の例:\n/当選者 35弾\n@abc123 グミ\n@def456 クリーム\n@ghi789 選択 強アカ`);
+      return;
+    }
+    const list = (parsed && parsed.winners) || [];
+    if (!list.length) {
+      await bot.sendMessage(msg.chat.id, '⚠️ 当選者を読み取れませんでした。@IDと提供内容が含まれているか確認してください。');
+      return;
+    }
+    const lines = []; const dups = []; let ng = 0;
+    for (const w of list) {
+      if (!w.x_id || !/^[A-Za-z0-9_]{1,15}$/.test(w.x_id)) { ng++; continue; }
+      try {
+        const r = deps.addWinner({ xId: w.x_id, campaign: w.campaign || '(企画名なし)', offer: w.offer || 'unknown', tier: w.tier === 'strong' ? 'strong' : 'normal', notes: w.notes || null });
+        lines.push(`・@${w.x_id} — ${OFFER_LABEL[w.offer] || w.offer}${w.tier === 'strong' ? ' 🔶強' : ''}`);
+        if (r.duplicate) dups.push(`@${w.x_id}(既存:「${r.duplicate.campaign}」が未完了)`);
+      } catch (e) { logger.error('addWinner failed:', e.message); ng++; }
+    }
+    const parts = [`✅ ${lines.length}名を当選者リストに登録しました (登録: ${who})`, '', `企画: ${list[0].campaign || '(企画名なし)'}`, ...lines];
+    if (dups.length) parts.push('', '⚠️ 同じIDで未完了の案件があります(重ねて登録しました):', ...dups.map((d) => `・${d}`));
+    if (parsed.warnings && parsed.warnings.length) parts.push('', '📌 確認してください:', ...parsed.warnings.map((w) => `・${w}`));
+    if (ng) parts.push('', `⚠️ ${ng}件は読み取れず登録できませんでした`);
+    parts.push('', 'この方たちがLINEでXのIDを名乗ると、自動で照合されて企画に沿った案内が始まります。');
+    await bot.sendMessage(msg.chat.id, parts.join('\n'));
+  });
+
+  // 登録済みの当選者を確認する
+  bot.onText(/^\/(当選者一覧|winnerlist)(?:@\S+)?$/, async (msg) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    const rows = deps.listActiveWinners ? deps.listActiveWinners(50) : [];
+    if (!rows.length) { await bot.sendMessage(msg.chat.id, '登録されている当選者はいません。\n/当選者 で登録できます。'); return; }
+    const body = rows.map((r) => `・@${r.x_id} — ${r.campaign} / ${OFFER_LABEL[r.offer] || r.offer}${r.tier === 'strong' ? ' 🔶' : ''} / ${r.status}${r.line_user_id ? ' / LINE紐付け済' : ''}`).join('\n');
+    await bot.sendMessage(msg.chat.id, `📋 対応中の当選者 (${rows.length}名)\n\n${body}`);
+  });
+
   bot.onText(/^\/(ヘルプ|help|使い方)(?:@\S+)?$/, async (msg) => {
     if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
     await bot.sendMessage(msg.chat.id, [
@@ -297,6 +342,18 @@ function setupCallbacks() {
       '　🧠 この修正を今後も反映する',
       'というボタンが付きます。',
       '押せばBotが覚えて以後ずっと反映されます。押さなければ今回だけ。',
+      '',
+      '【当選者を登録する】',
+      '当選者が決まったら、そのまま貼り付けてください。',
+      '/当選者 35弾',
+      '@abc123 グミ',
+      '@def456 クリーム',
+      '@ghi789 選択 強アカ',
+      '',
+      '書き方は自由です(AIが読み取ります)。',
+      '登録するとLINEでIDを名乗った時に自動照合され、',
+      'その方の企画に沿った案内が始まります。',
+      '/当選者一覧 … 登録済みの確認',
       '',
       '【先に知識だけ教えたいとき】',
       '/覚えて 内容',

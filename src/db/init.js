@@ -63,6 +63,16 @@ function linkTelegramMessage({ approvalId, tgMsgId }) { db.prepare('UPDATE appro
 function findApprovalByTgMsg(tgMsgId) { return db.prepare("SELECT * FROM approvals WHERE tg_msg_id = ? AND status = 'pending'").get(String(tgMsgId)); }
 function getLastIncoming(userId) { return db.prepare("SELECT content FROM conversations WHERE user_id = ? AND direction = 'incoming' ORDER BY timestamp DESC LIMIT 1").get(userId); }
 function updateApproval({ approvalId, status, finalReply }) { db.prepare('UPDATE approvals SET status = ?, final_reply = ?, resolved_at = CURRENT_TIMESTAMP WHERE approval_id = ?').run(status, finalReply, approvalId); }
+// Telegramから登録された当選者を追加する。同じIDの未完了案件があれば重複として知らせる。
+function addWinner({ xId, campaign, offer, tier = 'normal', notes = null }) {
+  const id = String(xId).replace(/^@/, '').trim();
+  const dup = db.prepare("SELECT id, campaign FROM winners WHERE lower(x_id) = lower(?) AND status NOT IN ('done','cancelled')").get(id);
+  const r = db.prepare('INSERT INTO winners (x_id, campaign, offer, tier, notes) VALUES (?, ?, ?, ?, ?)').run(id, campaign, offer, tier, notes);
+  return { id: r.lastInsertRowid, duplicate: dup || null };
+}
+function listActiveWinners(limit = 50) {
+  return db.prepare("SELECT id, x_id, campaign, offer, tier, status, line_user_id FROM winners WHERE status NOT IN ('done','cancelled') ORDER BY created_at DESC LIMIT ?").all(limit);
+}
 function findWinnerByXid(xId) { return db.prepare('SELECT * FROM winners WHERE lower(x_id) = lower(?) ORDER BY created_at DESC LIMIT 1').get(xId); }
 function findWinnerByLineUser(lineUserId) { return db.prepare('SELECT * FROM winners WHERE line_user_id = ? ORDER BY created_at DESC LIMIT 1').get(lineUserId); }
 function linkWinnerToLine({ winnerId, lineUserId }) {
@@ -71,4 +81,4 @@ function linkWinnerToLine({ winnerId, lineUserId }) {
 function saveKnowledgeGap({ userId, gap, approvalId }) { db.prepare('INSERT INTO knowledge_gaps (user_id, gap, approval_id) VALUES (?, ?, ?)').run(userId, gap, approvalId); }
 function resolveKnowledgeGaps(userId) { db.prepare('UPDATE knowledge_gaps SET resolved = 1 WHERE user_id = ? AND resolved = 0').run(userId); }
 function listKnowledgeGaps() { return db.prepare('SELECT * FROM knowledge_gaps WHERE resolved = 0 ORDER BY created_at DESC').all(); }
-module.exports = { linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+module.exports = { addWinner, listActiveWinners, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
