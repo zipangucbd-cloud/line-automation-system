@@ -71,6 +71,9 @@ async function flushInbox(userId) {
   await sendApproval(id, p, false);
 }
 
+// 「覚えて」「覚えて:」「/覚えて」+ 改行やスペース区切りのいずれでも知識追加として受け付ける
+const LEARN_RE = /^\s*\/?\s*(?:覚えて|おぼえて|学習|記憶|remember)\s*[:：]?\s*([\s\S]+)$/;
+
 // 運営がTelegramで教えた知識を learned.md に追記する(生成のたびに読み直されて反映される)
 const LEARNED_PATH = path.join(__dirname, '../knowledge/learned.md');
 function saveLearned(text) {
@@ -140,8 +143,8 @@ async function handleRevisionRequest(msg) {
   }
   let feedback = msg.text;
 
-  // 「覚えて:」で始まる返信は永続知識として保存し、以後すべての生成に反映する
-  const learnMatch = feedback.match(/^\s*(?:覚えて|おぼえて|学習|記憶)\s*[:：]?\s*([\s\S]+)$/);
+  // 「覚えて」で始まる返信は永続知識として保存し、以後すべての生成に反映する
+  const learnMatch = feedback.match(LEARN_RE);
   if (learnMatch) {
     const knowledge = learnMatch[1].trim();
     const saved = saveLearned(knowledge);
@@ -200,9 +203,10 @@ function setupCallbacks() {
       if (!msg.text) return;
       if (!config.telegram.approvalChatId || String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
 
-      // 承認依頼への返信でなくても、「覚えて:」単独で知識を追加できる
+      // 承認依頼への返信でなくても、「覚えて」単独で知識を追加できる(コロン・改行どちらでも可)
+      // ※グループではTelegramのプライバシーモードにより届かない場合があるため /覚えて も用意している
       if (!msg.reply_to_message) {
-        const m = msg.text.match(/^\s*(?:覚えて|おぼえて|学習|記憶)\s*[:：]\s*([\s\S]+)$/);
+        const m = msg.text.match(LEARN_RE);
         if (m) {
           const ok = saveLearned(m[1].trim());
           await bot.sendMessage(msg.chat.id, ok ? `🧠 覚えました:\n${m[1].trim()}\n\n(以後すべての返信に反映されます)` : '⚠️ 保存に失敗しました');
@@ -214,8 +218,16 @@ function setupCallbacks() {
     } catch (err) { logger.error('Revision handler error:', err.message); }
   });
 
+  // グループではプライバシーモードにより通常メッセージが届かないため、コマンド形式も用意する
+  bot.onText(/^\/(覚えて|remember)(?:@\S+)?(?:\s|\n)([\s\S]+)$/, async (msg, match) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    const knowledge = match[2].trim();
+    const ok = saveLearned(knowledge);
+    await bot.sendMessage(msg.chat.id, ok ? `🧠 覚えました:\n${knowledge}\n\n(以後すべての返信に反映されます)` : '⚠️ 保存に失敗しました');
+  });
+
   // 覚えた知識の一覧と取り消し
-  bot.onText(/^\/(知識|learned)$/, async (msg) => {
+  bot.onText(/^\/(知識|learned)(?:@\S+)?$/, async (msg) => {
     if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
     const items = listLearned();
     const body = items.length
@@ -223,7 +235,7 @@ function setupCallbacks() {
       : '(まだ何も覚えていません)';
     await bot.sendMessage(msg.chat.id, `🧠 覚えている知識 (${items.length}件)\n\n${body}\n\n取り消す場合: /忘れて 番号`);
   });
-  bot.onText(/^\/(忘れて|forget)\s+(\d+)$/, async (msg, match) => {
+  bot.onText(/^\/(忘れて|forget)(?:@\S+)?\s+(\d+)$/, async (msg, match) => {
     if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
     const removed = removeLearned(parseInt(match[2], 10));
     await bot.sendMessage(msg.chat.id, removed ? `🗑 忘れました:\n${removed}` : '⚠️ その番号の知識は見つかりませんでした');
