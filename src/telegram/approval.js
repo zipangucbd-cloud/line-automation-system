@@ -7,29 +7,62 @@ const pendingApprovals = new Map();
 const tgMsgToApproval = new Map();
 let deps = {};
 function setup(d) { deps = d; setupCallbacks(); }
+// 受信バッファ: 連続して届いたメッセージ・画像をまとめて1つの返信案にする
+// (Amazonキャッシュバックでは検索結果とカート画面の2枚を続けて送ってくるため)
+const inbox = new Map();
+const BATCH_MS = 10000;   // 最後の受信からこの時間待って確定
+const MAX_WAIT_MS = 60000; // 連投が続いても最初の受信からこの時間で強制確定
+const MAX_IMAGES = 5;
+
 async function handleMessage({ userId, userName, messageText, image = null }) {
-  logger.info(`Processing message from ${userName}`);
+  logger.info(`Buffering message from ${userName}${image ? ' (image)' : ''}`);
   deps.saveConversation({ userId, direction: 'incoming', content: messageText });
   deps.upsertCustomer({ userId, displayName: userName });
+
+  const e = inbox.get(userId) || { userName, texts: [], images: [], firstAt: Date.now(), timer: null };
+  e.userName = userName;
+  if (image) { if (e.images.length < MAX_IMAGES) e.images.push(image); }
+  else if (messageText) e.texts.push(messageText);
+
+  if (e.timer) clearTimeout(e.timer);
+  const remain = MAX_WAIT_MS - (Date.now() - e.firstAt);
+  e.timer = setTimeout(() => { flushInbox(userId).catch((err) => logger.error('Flush error:', err.message)); },
+                       Math.max(1000, Math.min(BATCH_MS, remain)));
+  inbox.set(userId, e);
+}
+
+// バッファを確定して、まとめて1回だけ返信案を生成する
+async function flushInbox(userId) {
+  const e = inbox.get(userId);
+  if (!e) return;
+  inbox.delete(userId);
+  if (e.timer) clearTimeout(e.timer);
+
+  const { userName, texts, images } = e;
+  const imgNote = images.length ? `[画像${images.length}枚を受信]` : '';
+  const messageText = [texts.join('\n'), imgNote].filter(Boolean).join('\n') || '[メッセージを受信]';
+  logger.info(`Processing from ${userName}: text${texts.length}件 / image${images.length}枚`);
+
   const customer = deps.getCustomer(userId);
   let winnerInfo = null;
   try { winnerInfo = buildWinnerContext({ deps, messageText, customer, userId }); if (winnerInfo) logger.info(`Winner match: ${winnerInfo.substring(0, 60)}`); }
-  catch (e) { logger.error('Winner match error:', e.message); }
+  catch (err) { logger.error('Winner match error:', err.message); }
   const history = deps.getRecentConversations(userId, 30).reverse().map(c => ({ role: c.direction === 'incoming' ? 'user' : 'assistant', content: c.content }));
+
   let reply, stage = null;
-  try { ({ reply, stage } = await generateReply({ userName, messageText, conversationHistory: history, customerData: customer, winnerInfo, image })); }
+  try { ({ reply, stage } = await generateReply({ userName, messageText, conversationHistory: history, customerData: customer, winnerInfo, images })); }
   catch (err) {
     logger.error('Reply generation failed:', err.message);
     const bot = getBot();
     if (bot && config.telegram.approvalChatId) {
       const trunc = messageText.length > 200 ? messageText.substring(0, 200) + '...' : messageText;
-      try { await bot.sendMessage(config.telegram.approvalChatId, `⚠️ 返信生成に失敗しました。chat.line.bizで手動対応してください。\n\n👤 ${userName}様:\n${trunc}\n\nエラー: ${err.message}`); } catch (e) {}
+      try { await bot.sendMessage(config.telegram.approvalChatId, `⚠️ 返信生成に失敗しました。chat.line.bizで手動対応してください。\n\n👤 ${userName}様:\n${trunc}\n\nエラー: ${err.message}`); } catch (e2) {}
     }
     return;
   }
-  if (stage) { try { deps.upsertCustomer({ userId, stage }); logger.info(`Stage -> ${stage}`); } catch (e) { logger.error('Stage save failed:', e.message); } }
+  if (stage) { try { deps.upsertCustomer({ userId, stage }); logger.info(`Stage -> ${stage}`); } catch (err) { logger.error('Stage save failed:', err.message); } }
   const id = Date.now().toString();
-  const p = { userId, userName, reply, stage, messageText, customerData: customer, history, winnerInfo, image, tgMsgId: null };
+  const p = { userId, userName, reply, stage, messageText, customerData: customer, history, winnerInfo, images, tgMsgId: null };
   pendingApprovals.set(id, p);
   deps.saveApproval({ approvalId: id, userId, generatedReply: reply, status: 'pending' });
   await sendApproval(id, p, false);
@@ -61,7 +94,7 @@ async function handleRevisionRequest(msg) {
   logger.info(`Revision requested for #${approvalId}: ${feedback.substring(0, 80)}`);
   let newReply, newStage = null;
   try {
-    ({ reply: newReply, stage: newStage } = await generateReply({ userName: p.userName, messageText: p.messageText, conversationHistory: p.history, customerData: p.customerData, winnerInfo: p.winnerInfo, image: p.image, previousReply: p.reply, feedback }));
+    ({ reply: newReply, stage: newStage } = await generateReply({ userName: p.userName, messageText: p.messageText, conversationHistory: p.history, customerData: p.customerData, winnerInfo: p.winnerInfo, images: p.images, previousReply: p.reply, feedback }));
   } catch (err) {
     logger.error('Revision generation failed:', err.message);
     try { await bot.sendMessage(msg.chat.id, `❌ 再生成に失敗しました: ${err.message}`); } catch (e) {}
@@ -75,7 +108,7 @@ async function handleRevisionRequest(msg) {
     try { await bot.editMessageText(`✏️ 修正指示を反映 → 🔄 #${newId}\n\n指示: ${feedback}`, { chat_id: msg.chat.id, message_id: p.tgMsgId }); } catch (e) {}
   }
   if (newStage) { try { deps.upsertCustomer({ userId: p.userId, stage: newStage }); } catch (e) {} }
-  const np = { userId: p.userId, userName: p.userName, reply: newReply, stage: newStage, messageText: p.messageText, customerData: p.customerData, history: p.history, winnerInfo: p.winnerInfo, image: p.image, tgMsgId: null };
+  const np = { userId: p.userId, userName: p.userName, reply: newReply, stage: newStage, messageText: p.messageText, customerData: p.customerData, history: p.history, winnerInfo: p.winnerInfo, images: p.images, tgMsgId: null };
   pendingApprovals.set(newId, np);
   deps.saveApproval({ approvalId: newId, userId: p.userId, generatedReply: newReply, status: 'pending' });
   await sendApproval(newId, np, true);

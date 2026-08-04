@@ -18,7 +18,7 @@ const STAGE_INSTRUCTION = `
 ステージIDは次から選びます:
 S1_問診回答待ち / S1_問診不足追撃 / S2_本人確認待ち / S3_事前確認待ち / S4_オファー提示済 / S4_Amazon資格確認 / S4_LP案内済 / S4_カートスクショ待ち / S5_注文番号待ち / S5_発送済 / S6_到着連絡待ち / S6_撮影説明済 / S6_読了確認待ち / S7_レビュー下書き待ち / S7_下書き確認済 / S8_EC投稿待ち / S8_完了報告待ち / S9_キャッシュバック済 / S9_連鎖案内済 / 完了 / 対応保留`;
 
-async function generateReply({ userName, messageText, conversationHistory = [], customerData = null, winnerInfo = null, image = null, previousReply = null, feedback = null }) {
+async function generateReply({ userName, messageText, conversationHistory = [], customerData = null, winnerInfo = null, images = [], previousReply = null, feedback = null }) {
   try {
     let contextInfo = '';
     if (customerData) {
@@ -31,15 +31,23 @@ async function generateReply({ userName, messageText, conversationHistory = [], 
     const messages = [];
     for (const msg of conversationHistory) messages.push({ role: msg.role, content: msg.content });
 
-    // 画像が届いた場合は、何のスクリーンショットかを判定させたうえで返信を作らせる
-    if (image) {
-      messages.push({
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.base64 } },
-          { type: 'text', text: `【${userName}様から画像が届きました】\nこの画像が何のスクリーンショットかを判断し(Xのプロフィール画面／Amazonの検索結果画面／Amazonのカート画面／レビュー投稿の下書き／商品の到着写真／その他)、フロー上の適切な次の一手を返信案にしてください。\n判断に迷う場合や、求めていたものと違う画像の場合は、返信案の冒頭に「[要人間判断]」を付けてください。${contextInfo}` },
-        ],
+    // 画像が届いた場合は全枚数をまとめて渡し、返信は必ず1つだけ作らせる
+    // (Amazonキャッシュバックでは検索結果画面とカート画面の2枚が続けて届く)
+    if (images && images.length) {
+      const content = images.map((img) => ({
+        type: 'image',
+        source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
+      }));
+      const many = images.length > 1;
+      content.push({
+        type: 'text',
+        text: `【${userName}様から画像が${images.length}枚届きました】${messageText ? `\n(同時に届いたメッセージ: ${messageText})` : ''}\n`
+          + `${many ? 'これらの画像は一連のものです。**全ての画像を確認したうえで、返信は1通だけ**作成してください。画像ごとに分けて返信しないこと。\n' : ''}`
+          + `各画像が何のスクリーンショットかを判断し(Xのプロフィール画面／Amazonの検索結果画面／Amazonのカート画面／レビュー投稿の下書き／商品の到着写真／その他)、フロー上の適切な次の一手を返信案にしてください。\n`
+          + `${many ? '例えば「Amazonの検索結果画面」と「カート画面」の2枚が揃っていれば、カート追加まで完了しているので購入手続きの案内に進みます。片方しか無い場合は不足している方を依頼してください。\n' : ''}`
+          + `判断に迷う場合や、求めていたものと違う画像の場合は、返信案の冒頭に「[要人間判断]」を付けてください。${contextInfo}`,
       });
+      messages.push({ role: 'user', content });
     } else {
       messages.push({ role: 'user', content: `【${userName}様からのメッセージ】\n${messageText}${contextInfo}` });
     }
