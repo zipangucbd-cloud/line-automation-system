@@ -134,8 +134,15 @@ async function sendApproval(id, p, isRevision) {
   const alert = gaps.length
     ? `\n\n🚨 このまま送らないでください — Botに以下の知識がありません:\n${gaps.map((g) => `・${g}`).join('\n')}\n(Claudeに教えて知識を追加してから、✏️返信で再生成してください)`
     : '';
-  const text = `${head}${alert}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}\n\n━━━━━━━━━━\n✏️ 修正したい場合：このメッセージに「返信」で指示を送ると再生成します`;
-  const opts = { reply_markup: { inline_keyboard: [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]] } };
+  // 修正で作り直した場合は、その指示を今後も反映するか(=永続知識にするか)をこの場で選べるようにする
+  const fb = lastFeedback.get(id);
+  const learnNote = isRevision && fb
+    ? `\n\n💡 この修正「${fb}」を今後も反映しますか?\n　→ 下の🧠を押すとBotが覚えます(押さなければ今回だけ)`
+    : '';
+  const text = `${head}${alert}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
+  const rows = [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]];
+  if (isRevision && fb) rows.push([{ text: '🧠 この修正を今後も反映する', callback_data: `k:${id}` }]);
+  const opts = { reply_markup: { inline_keyboard: rows } };
   try {
     const sent = await bot.sendMessage(config.telegram.approvalChatId, text, opts);
     if (sent && sent.message_id) { p.tgMsgId = sent.message_id; tgMsgToApproval.set(sent.message_id, id); try { deps.linkTelegramMessage && deps.linkTelegramMessage({ approvalId: id, tgMsgId: sent.message_id }); } catch (e) {} }
@@ -282,16 +289,19 @@ function setupCallbacks() {
       '【返信案が届いたら】',
       '✅ 承認 … そのままLINEに送信されます',
       '✏️ 修正 … このメッセージに「返信」で指示を書くと作り直します',
-      '　　例:「もっと短く」「URLも入れて」「結びは1つに」',
+      '　　例:「もっと短く」「リンクはこれ https://…」「結びは1つに」',
       '❌ 却下 … 送りません。理由を聞かれるので答えてもらえると改善に繋がります',
       '',
-      '【Botに知識を教える】',
+      '【修正がそのままBotの学習になります】',
+      '修正を出すと作り直した案が届き、そこに',
+      '　🧠 この修正を今後も反映する',
+      'というボタンが付きます。',
+      '押せばBotが覚えて以後ずっと反映されます。押さなければ今回だけ。',
+      '',
+      '【先に知識だけ教えたいとき】',
       '/覚えて 内容',
       '　例: /覚えて 8月から送料が1800円に変わりました',
       '　→ 以後すべての返信に反映されます(再起動不要)',
-      '',
-      '承認依頼への「返信」で「覚えて ○○」と書いてもOKです。',
-      'その場合は知識を覚えたうえで返信案も作り直します。',
       '',
       '【知識の管理】',
       '/知識 … 覚えている内容の一覧',
@@ -338,11 +348,22 @@ function setupCallbacks() {
       const fb = lastFeedback.get(id);
       if (!fb) { await bot.answerCallbackQuery(q.id, { text: '対象が見つかりません' }); return; }
       const ok = saveLearned(fb, who);
-      await bot.answerCallbackQuery(q.id, { text: ok ? '🧠 覚えました' : '保存に失敗' });
-      if (ok) {
-        lastFeedback.delete(id);
-        try { await bot.editMessageText(`🧠 今後も反映します(${who}さんが登録)\n\n「${fb}」`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {}
-      }
+      await bot.answerCallbackQuery(q.id, { text: ok ? '🧠 覚えました。以後の返信に反映されます' : '保存に失敗' });
+      if (!ok) return;
+      lastFeedback.delete(id);
+      // 承認ボタンは残したまま、学習済みであることだけを本文に追記する
+      const stillPending = pendingApprovals.has(id);
+      try {
+        await bot.editMessageText(
+          `${q.message.text}\n\n🧠 覚えました(${who}さん登録): 「${fb}」`,
+          {
+            chat_id: q.message.chat.id,
+            message_id: q.message.message_id,
+            reply_markup: stillPending
+              ? { inline_keyboard: [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]] }
+              : undefined,
+          });
+      } catch (e) {}
       return;
     }
 
@@ -354,15 +375,6 @@ function setupCallbacks() {
       await bot.answerCallbackQuery(q.id, { text: ok ? '✅ 送信完了' : '❌ 失敗' });
       try { await bot.editMessageText(`✅ 承認・送信済 (${who})\n\n${q.message.text}`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {}
 
-      // 修正を経て承認された場合、その修正指示を永続知識にするか一度だけ尋ねる
-      const fb = lastFeedback.get(id);
-      if (ok && fb) {
-        try {
-          await bot.sendMessage(q.message.chat.id,
-            `💡 今回の修正「${fb}」\n\nこれは今回だけの指示ですか?それとも今後もこうすべきルールですか?`,
-            { reply_markup: { inline_keyboard: [[{ text: '🧠 今後もこうする(覚えさせる)', callback_data: `k:${id}` }, { text: '今回だけ', callback_data: `x:${id}` }]] } });
-        } catch (e) {}
-      }
       pendingApprovals.delete(id);
       if (p.tgMsgId) tgMsgToApproval.delete(p.tgMsgId);
     } else if (action === 'r') {
