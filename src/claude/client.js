@@ -5,7 +5,23 @@ const config = require('../config');
 const logger = require('../utils/logger');
 const client = new Anthropic({ apiKey: config.claude.apiKey });
 const systemPromptPath = path.join(__dirname, '../knowledge/system_prompt.md');
-const systemPrompt = fs.existsSync(systemPromptPath) ? fs.readFileSync(systemPromptPath, 'utf-8') : 'あなたはSEXTASY VIP ROOMの応対AIです。丁寧なフォーマル敬語で応対してください。';
+const learnedPath = path.join(__dirname, '../knowledge/learned.md');
+
+// 運営がTelegramで教えた知識を即座に反映するため、生成のたびにファイルを読み直す
+function buildSystemPrompt() {
+  const base = fs.existsSync(systemPromptPath)
+    ? fs.readFileSync(systemPromptPath, 'utf-8')
+    : 'あなたはSEXTASY VIP ROOMの応対AIです。丁寧なフォーマル敬語で応対してください。';
+  let learned = '';
+  if (fs.existsSync(learnedPath)) {
+    const txt = fs.readFileSync(learnedPath, 'utf-8').trim();
+    if (txt) {
+      learned = `\n\n---\n# 【最優先】運営から直接教わった知識\n`
+        + `以下は運営がTelegram経由で追加した情報です。上記の一般的な記述と食い違う場合は、**必ずこちらを優先**してください。\n\n${txt}\n`;
+    }
+  }
+  return base + learned;
+}
 
 // 返信案とあわせて現在ステージを申告させる。ステージ行は送信文から取り除いてDBに保存する。
 const STAGE_INSTRUCTION = `
@@ -61,7 +77,7 @@ async function generateReply({ userName, messageText, conversationHistory = [], 
     const response = await client.messages.create({
       model: config.claude.model,
       max_tokens: 2048,
-      system: systemPrompt + STAGE_INSTRUCTION,
+      system: buildSystemPrompt() + STAGE_INSTRUCTION,
       messages,
     });
     const raw = response.content[0].text;

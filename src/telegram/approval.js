@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { getBot } = require('./bot');
 const { generateReply } = require('../claude/client');
 const { buildWinnerContext } = require('../utils/winner_match');
@@ -69,6 +71,35 @@ async function flushInbox(userId) {
   await sendApproval(id, p, false);
 }
 
+// 運営がTelegramで教えた知識を learned.md に追記する(生成のたびに読み直されて反映される)
+const LEARNED_PATH = path.join(__dirname, '../knowledge/learned.md');
+function saveLearned(text) {
+  try {
+    const stamp = new Date().toISOString().slice(0, 10);
+    const line = `- [${stamp}] ${String(text).replace(/\n+/g, ' ').trim()}\n`;
+    fs.appendFileSync(LEARNED_PATH, line, 'utf-8');
+    logger.info(`Learned: ${text.substring(0, 80)}`);
+    return true;
+  } catch (e) { logger.error('Save learned failed:', e.message); return false; }
+}
+function listLearned() {
+  try {
+    if (!fs.existsSync(LEARNED_PATH)) return [];
+    return fs.readFileSync(LEARNED_PATH, 'utf-8').split('\n').filter((l) => l.trim().startsWith('- ['));
+  } catch (e) { return []; }
+}
+function removeLearned(index) {
+  try {
+    const lines = fs.readFileSync(LEARNED_PATH, 'utf-8').split('\n');
+    const idxs = lines.map((l, i) => (l.trim().startsWith('- [') ? i : -1)).filter((i) => i >= 0);
+    if (index < 1 || index > idxs.length) return null;
+    const removed = lines[idxs[index - 1]];
+    lines.splice(idxs[index - 1], 1);
+    fs.writeFileSync(LEARNED_PATH, lines.join('\n'), 'utf-8');
+    return removed;
+  } catch (e) { logger.error('Remove learned failed:', e.message); return null; }
+}
+
 // 返信案に含まれる [知識不足: ...] を拾ってDBに残す。運営が知識を足して再生成するための記録。
 function recordGaps({ userId, reply, approvalId }) {
   try {
@@ -107,7 +138,22 @@ async function handleRevisionRequest(msg) {
     try { await bot.sendMessage(msg.chat.id, '⚠️ この承認依頼は既に処理済みです'); } catch (e) {}
     return;
   }
-  const feedback = msg.text;
+  let feedback = msg.text;
+
+  // 「覚えて:」で始まる返信は永続知識として保存し、以後すべての生成に反映する
+  const learnMatch = feedback.match(/^\s*(?:覚えて|おぼえて|学習|記憶)\s*[:：]?\s*([\s\S]+)$/);
+  if (learnMatch) {
+    const knowledge = learnMatch[1].trim();
+    const saved = saveLearned(knowledge);
+    if (saved) {
+      try { await bot.sendMessage(msg.chat.id, `🧠 覚えました:\n${knowledge}\n\n(以後すべての返信に反映されます。この内容を踏まえて返信案を作り直します)`); } catch (e) {}
+      try { deps.resolveKnowledgeGaps && deps.resolveKnowledgeGaps(p.userId); } catch (e) {}
+    } else {
+      try { await bot.sendMessage(msg.chat.id, '⚠️ 知識の保存に失敗しました'); } catch (e) {}
+    }
+    feedback = `運営から次の知識が追加されました。これを踏まえて返信案を作り直してください:\n${knowledge}`;
+  }
+
   logger.info(`Revision requested for #${approvalId}: ${feedback.substring(0, 80)}`);
   let newReply, newStage = null;
   try {
@@ -151,11 +197,36 @@ function setupCallbacks() {
   const bot = getBot(); if (!bot) return;
   bot.on('message', async (msg) => {
     try {
-      if (!msg.text || msg.text.startsWith('/')) return;
+      if (!msg.text) return;
       if (!config.telegram.approvalChatId || String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
-      if (!msg.reply_to_message) return;
+
+      // 承認依頼への返信でなくても、「覚えて:」単独で知識を追加できる
+      if (!msg.reply_to_message) {
+        const m = msg.text.match(/^\s*(?:覚えて|おぼえて|学習|記憶)\s*[:：]\s*([\s\S]+)$/);
+        if (m) {
+          const ok = saveLearned(m[1].trim());
+          await bot.sendMessage(msg.chat.id, ok ? `🧠 覚えました:\n${m[1].trim()}\n\n(以後すべての返信に反映されます)` : '⚠️ 保存に失敗しました');
+        }
+        return;
+      }
+      if (msg.text.startsWith('/')) return;
       await handleRevisionRequest(msg);
     } catch (err) { logger.error('Revision handler error:', err.message); }
+  });
+
+  // 覚えた知識の一覧と取り消し
+  bot.onText(/^\/(知識|learned)$/, async (msg) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    const items = listLearned();
+    const body = items.length
+      ? items.map((l, i) => `${i + 1}. ${l.replace(/^-\s*/, '')}`).join('\n')
+      : '(まだ何も覚えていません)';
+    await bot.sendMessage(msg.chat.id, `🧠 覚えている知識 (${items.length}件)\n\n${body}\n\n取り消す場合: /忘れて 番号`);
+  });
+  bot.onText(/^\/(忘れて|forget)\s+(\d+)$/, async (msg, match) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    const removed = removeLearned(parseInt(match[2], 10));
+    await bot.sendMessage(msg.chat.id, removed ? `🗑 忘れました:\n${removed}` : '⚠️ その番号の知識は見つかりませんでした');
   });
   bot.on('callback_query', async (q) => {
     const [action, id] = q.data.split(':');
