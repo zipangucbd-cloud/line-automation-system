@@ -44,12 +44,13 @@ function initDb() {
   logger.info(`Database initialized at ${dbPath}`);
 }
 function getCustomer(userId) { return db.prepare('SELECT * FROM customers WHERE user_id = ?').get(userId); }
-function upsertCustomer({ userId, displayName = null, xHandle = null }) {
-  db.prepare(`INSERT INTO customers (user_id, display_name, x_handle) VALUES (?, ?, ?)
+function upsertCustomer({ userId, displayName = null, xHandle = null, stage = null }) {
+  db.prepare(`INSERT INTO customers (user_id, display_name, x_handle, stage) VALUES (?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
       x_handle = COALESCE(excluded.x_handle, customers.x_handle),
       display_name = COALESCE(excluded.display_name, customers.display_name),
-      updated_at = CURRENT_TIMESTAMP`).run(userId, displayName, xHandle);
+      stage = COALESCE(excluded.stage, customers.stage),
+      updated_at = CURRENT_TIMESTAMP`).run(userId, displayName, xHandle, stage);
 }
 function getRecentConversations(userId, limit = 10) { return db.prepare('SELECT * FROM conversations WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?').all(userId, limit); }
 function saveConversation({ userId, direction, content }) { db.prepare('INSERT INTO conversations (user_id, direction, content) VALUES (?, ?, ?)').run(userId, direction, content); }

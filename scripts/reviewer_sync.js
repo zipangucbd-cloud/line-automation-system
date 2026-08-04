@@ -13,12 +13,24 @@ if (!TOKEN) { console.log('NOTION_TOKEN not set; skipping'); process.exit(0); }
 
 const H = { 'Authorization': `Bearer ${TOKEN}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function api(path, opts = {}, retry = 2) {
-  const r = await fetch('https://api.notion.com/v1' + path, { ...opts, headers: H });
-  if (r.status === 429 && retry > 0) { await sleep(1500); return api(path, opts, retry - 1); }
-  const j = await r.json();
-  if (!r.ok) throw new Error(`${r.status} ${JSON.stringify(j).slice(0, 200)}`);
-  return j;
+// Notion API: レート制限だけでなくネットワークの一時的な失敗でも再試行する
+async function api(path, opts = {}, tries = 5) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch('https://api.notion.com/v1' + path, { ...opts, headers: H });
+      if (r.status === 429 || r.status >= 500) { await sleep(2000 * (i + 1)); continue; }
+      const j = await r.json();
+      if (!r.ok) throw new Error(`${r.status} ${JSON.stringify(j).slice(0, 200)}`);
+      return j;
+    } catch (e) {
+      lastErr = e;
+      // 4xx等のAPIエラーは再試行しても無駄なので即座に投げる(ネットワーク系のみ再試行)
+      if (!/fetch failed|network|ECONN|ETIMEDOUT|socket/i.test(e.message)) throw e;
+      await sleep(3000 * (i + 1));
+    }
+  }
+  throw lastErr;
 }
 
 // ---- 最小xlsxパーサ ----
