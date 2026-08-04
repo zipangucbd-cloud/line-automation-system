@@ -136,19 +136,43 @@ async function sendApproval(id, p, isRevision) {
   const opts = { reply_markup: { inline_keyboard: [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]] } };
   try {
     const sent = await bot.sendMessage(config.telegram.approvalChatId, text, opts);
-    if (sent && sent.message_id) { p.tgMsgId = sent.message_id; tgMsgToApproval.set(sent.message_id, id); }
+    if (sent && sent.message_id) { p.tgMsgId = sent.message_id; tgMsgToApproval.set(sent.message_id, id); try { deps.linkTelegramMessage && deps.linkTelegramMessage({ approvalId: id, tgMsgId: sent.message_id }); } catch (e) {} }
   } catch (err) { logger.error('Telegram send failed:', err.message); }
 }
 // 承認依頼メッセージへのTelegram返信 = 修正指示 → Claude再生成 → 修正版の承認依頼を発行
 async function handleRevisionRequest(msg) {
   const bot = getBot();
   const replyToId = msg.reply_to_message.message_id;
-  const approvalId = tgMsgToApproval.get(replyToId);
-  if (!approvalId) return;
-  const p = pendingApprovals.get(approvalId);
+  let approvalId = tgMsgToApproval.get(replyToId);
+  let p = approvalId ? pendingApprovals.get(approvalId) : null;
+
+  // Bot再起動でメモリ上の対応表が消えている場合はDBから復元する
   if (!p) {
-    try { await bot.sendMessage(msg.chat.id, '⚠️ この承認依頼は既に処理済みです'); } catch (e) {}
-    return;
+    const rec = deps.findApprovalByTgMsg && deps.findApprovalByTgMsg(replyToId);
+    if (!rec) {
+      try { await bot.sendMessage(msg.chat.id, '⚠️ この承認依頼は既に処理済み、または対象が見つかりませんでした。\n(お客様が新しくメッセージを送ると、新しい承認依頼が作成されます)'); } catch (e) {}
+      return;
+    }
+    approvalId = rec.approval_id;
+    const customer = deps.getCustomer(rec.user_id);
+    const lastIn = deps.getLastIncoming ? deps.getLastIncoming(rec.user_id) : null;
+    const history = deps.getRecentConversations(rec.user_id, 30).reverse()
+      .map((c) => ({ role: c.direction === 'incoming' ? 'user' : 'assistant', content: c.content }));
+    p = {
+      userId: rec.user_id,
+      userName: (customer && customer.display_name) || 'お客様',
+      reply: rec.generated_reply,
+      stage: customer && customer.stage,
+      messageText: (lastIn && lastIn.content) || '(直近のメッセージ)',
+      customerData: customer,
+      history,
+      winnerInfo: null,
+      images: [],   // 画像は保存していないため復元できない
+      tgMsgId: replyToId,
+    };
+    pendingApprovals.set(approvalId, p);
+    tgMsgToApproval.set(replyToId, approvalId);
+    logger.info(`Restored approval #${approvalId} from DB`);
   }
   let feedback = msg.text;
 
@@ -201,7 +225,7 @@ async function proposeFollowup({ userId, userName, text, label }) {
   const opts = { reply_markup: { inline_keyboard: [[{ text: '✅ 承認して送信', callback_data: `a:${id}` }, { text: '❌ 見送り', callback_data: `r:${id}` }]] } };
   try {
     const sent = await bot.sendMessage(config.telegram.approvalChatId, msg, opts);
-    if (sent && sent.message_id) { p.tgMsgId = sent.message_id; tgMsgToApproval.set(sent.message_id, id); }
+    if (sent && sent.message_id) { p.tgMsgId = sent.message_id; tgMsgToApproval.set(sent.message_id, id); try { deps.linkTelegramMessage && deps.linkTelegramMessage({ approvalId: id, tgMsgId: sent.message_id }); } catch (e) {} }
     return true;
   } catch (e) { logger.error('Followup propose failed:', e.message); return false; }
 }
