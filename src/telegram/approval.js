@@ -64,7 +64,17 @@ async function flushInbox(userId) {
     }
     return;
   }
-  if (stage) { try { deps.upsertCustomer({ userId, stage }); logger.info(`Stage -> ${stage}`); } catch (err) { logger.error('Stage save failed:', err.message); } }
+  if (stage) {
+    try {
+      deps.upsertCustomer({ userId, stage });
+      logger.info(`Stage -> ${stage}`);
+      // 完了ステージに達したら当選者を自動でdoneにし、対応中リストから外す
+      if (/^(完了|S9_キャッシュバック済|S9_連鎖案内済)$/.test(stage) && deps.autoCompleteWinners) {
+        const n = deps.autoCompleteWinners();
+        if (n) logger.info(`Auto-completed ${n} winners`);
+      }
+    } catch (err) { logger.error('Stage save failed:', err.message); }
+  }
   const id = Date.now().toString();
   const p = { userId, userName, reply, stage, messageText, customerData: customer, history, winnerInfo, images, tgMsgId: null };
   pendingApprovals.set(id, p);
@@ -317,13 +327,54 @@ function setupCallbacks() {
     await bot.sendMessage(msg.chat.id, parts.join('\n'));
   });
 
-  // 登録済みの当選者を確認する
-  bot.onText(/^\/(当選者一覧|winnerlist)(?:@\S+)?$/, async (msg) => {
+  // 当選者の進捗確認。人数が増えても読めるよう、生の一覧ではなく状況別サマリを出す。
+  // 企画名を付ければその企画だけを詳細表示できる。例: /当選者一覧 35弾
+  bot.onText(/^\/(当選者一覧|winnerlist)(?:@\S+)?(?:\s+([\s\S]+))?$/, async (msg, match) => {
     if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
-    const rows = deps.listActiveWinners ? deps.listActiveWinners(50) : [];
-    if (!rows.length) { await bot.sendMessage(msg.chat.id, '登録されている当選者はいません。\n/当選者 で登録できます。'); return; }
-    const body = rows.map((r) => `・@${r.x_id} — ${r.campaign} / ${OFFER_LABEL[r.offer] || r.offer}${r.tier === 'strong' ? ' 🔶' : ''} / ${r.status}${r.line_user_id ? ' / LINE紐付け済' : ''}`).join('\n');
-    await bot.sendMessage(msg.chat.id, `📋 対応中の当選者 (${rows.length}名)\n\n${body}`);
+    const filter = (match[2] || '').trim() || null;
+    try { const n = deps.autoCompleteWinners ? deps.autoCompleteWinners() : 0; if (n) logger.info(`Auto-completed ${n} winners`); } catch (e) {}
+    const d = deps.winnerDashboard({ campaign: filter });
+    if (!d.total) {
+      await bot.sendMessage(msg.chat.id, filter ? `「${filter}」に該当する対応中の当選者はいません。` : '対応中の当選者はいません。\n/当選者 で登録できます。');
+      return;
+    }
+    const parts = [`📋 対応中の当選者: ${d.total}名${filter ? ` (${filter})` : ''}`, ''];
+
+    // 企画が複数ある場合はまず企画別の内訳を見せる
+    const camps = Object.entries(d.campaigns).sort((a, b) => b[1] - a[1]);
+    if (!filter && camps.length > 1) {
+      parts.push('【企画別】', ...camps.map(([c, n]) => `・${c}: ${n}名`), '');
+    }
+    parts.push('【状況別】');
+    for (const [stage, arr] of Object.entries(d.groups).sort((a, b) => b[1].length - a[1].length)) {
+      parts.push(`・${stage}: ${arr.length}名`);
+    }
+    if (d.stalled.length) {
+      parts.push('', `⚠️ 7日以上動きがない方: ${d.stalled.length}名`);
+      for (const r of d.stalled.slice(0, 10)) {
+        parts.push(`・@${r.x_id} — ${r.campaign} / ${r.line_user_id ? (r.stage || 'ステージ未判定') : 'LINE未接続'} / ${r.idle_days}日`);
+      }
+      if (d.stalled.length > 10) parts.push(`　…他${d.stalled.length - 10}名`);
+    }
+    // 特定の企画に絞った場合のみ全員を列挙する
+    if (filter) {
+      parts.push('', '【全員】');
+      for (const r of d.rows.slice(0, 40)) {
+        parts.push(`・@${r.x_id} — ${OFFER_LABEL[r.offer] || r.offer}${r.tier === 'strong' ? ' 🔶' : ''} / ${r.line_user_id ? (r.stage || '接続済') : 'LINE未接続'}`);
+      }
+      if (d.rows.length > 40) parts.push(`　…他${d.rows.length - 40}名`);
+    } else if (camps.length) {
+      parts.push('', `企画ごとの詳細: /当選者一覧 ${camps[0][0]}`);
+    }
+    parts.push('', '完了した方は自動で一覧から外れます。手動なら /完了 @ID');
+    await bot.sendMessage(msg.chat.id, parts.join('\n'));
+  });
+
+  // 手動で完了にする(レビューまで終わった方を一覧から外す)
+  bot.onText(/^\/(完了|done)(?:@\S+)?\s+@?(\S+)$/, async (msg, match) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    const n = deps.completeWinnerByXid ? deps.completeWinnerByXid(match[2]) : 0;
+    await bot.sendMessage(msg.chat.id, n ? `✅ @${match[2].replace(/^@/, '')} を完了にしました(一覧から外れます)` : `⚠️ @${match[2].replace(/^@/, '')} は対応中の当選者に見つかりませんでした`);
   });
 
   bot.onText(/^\/(ヘルプ|help|使い方)(?:@\S+)?$/, async (msg) => {

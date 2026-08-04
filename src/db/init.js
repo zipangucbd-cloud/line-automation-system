@@ -73,6 +73,39 @@ function addWinner({ xId, campaign, offer, tier = 'normal', notes = null }) {
 function listActiveWinners(limit = 50) {
   return db.prepare("SELECT id, x_id, campaign, offer, tier, status, line_user_id FROM winners WHERE status NOT IN ('done','cancelled') ORDER BY created_at DESC LIMIT ?").all(limit);
 }
+// 当選者の進捗サマリ。件数が増えても読める形にするため、生の一覧ではなく状況別に集計する。
+function winnerDashboard({ campaign = null, stalledDays = 7 } = {}) {
+  const where = campaign ? "AND w.campaign LIKE '%' || ? || '%'" : '';
+  const params = campaign ? [campaign] : [];
+  const rows = db.prepare(`
+    SELECT w.id, w.x_id, w.campaign, w.offer, w.tier, w.status, w.line_user_id, w.updated_at,
+           c.stage AS stage, c.display_name AS display_name,
+           CAST(julianday('now') - julianday(COALESCE(c.updated_at, w.updated_at)) AS INTEGER) AS idle_days
+    FROM winners w LEFT JOIN customers c ON c.user_id = w.line_user_id
+    WHERE w.status NOT IN ('done','cancelled') ${where}
+    ORDER BY idle_days DESC`).all(...params);
+  const groups = {};
+  for (const r of rows) {
+    const key = !r.line_user_id ? 'LINE未接続' : (r.stage || 'ステージ未判定');
+    (groups[key] = groups[key] || []).push(r);
+  }
+  const stalled = rows.filter((r) => r.idle_days >= stalledDays);
+  const campaigns = {};
+  for (const r of rows) campaigns[r.campaign] = (campaigns[r.campaign] || 0) + 1;
+  return { total: rows.length, groups, stalled, campaigns, rows };
+}
+// 完了ステージに到達した当選者を自動的にdoneにする(一覧が無限に伸びないように)
+function autoCompleteWinners() {
+  const r = db.prepare(`
+    UPDATE winners SET status = 'done', updated_at = CURRENT_TIMESTAMP
+    WHERE status NOT IN ('done','cancelled') AND line_user_id IN (
+      SELECT user_id FROM customers WHERE stage IN ('完了','S9_キャッシュバック済','S9_連鎖案内済'))`).run();
+  return r.changes;
+}
+function completeWinnerByXid(xId) {
+  const r = db.prepare("UPDATE winners SET status = 'done', updated_at = CURRENT_TIMESTAMP WHERE lower(x_id) = lower(?) AND status NOT IN ('done','cancelled')").run(String(xId).replace(/^@/, ''));
+  return r.changes;
+}
 function findWinnerByXid(xId) { return db.prepare('SELECT * FROM winners WHERE lower(x_id) = lower(?) ORDER BY created_at DESC LIMIT 1').get(xId); }
 function findWinnerByLineUser(lineUserId) { return db.prepare('SELECT * FROM winners WHERE line_user_id = ? ORDER BY created_at DESC LIMIT 1').get(lineUserId); }
 function linkWinnerToLine({ winnerId, lineUserId }) {
@@ -81,4 +114,4 @@ function linkWinnerToLine({ winnerId, lineUserId }) {
 function saveKnowledgeGap({ userId, gap, approvalId }) { db.prepare('INSERT INTO knowledge_gaps (user_id, gap, approval_id) VALUES (?, ?, ?)').run(userId, gap, approvalId); }
 function resolveKnowledgeGaps(userId) { db.prepare('UPDATE knowledge_gaps SET resolved = 1 WHERE user_id = ? AND resolved = 0').run(userId); }
 function listKnowledgeGaps() { return db.prepare('SELECT * FROM knowledge_gaps WHERE resolved = 0 ORDER BY created_at DESC').all(); }
-module.exports = { addWinner, listActiveWinners, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+module.exports = { addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
