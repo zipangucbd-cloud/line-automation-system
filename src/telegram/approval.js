@@ -61,7 +61,12 @@ async function flushInbox(userId) {
     const bot = getBot();
     if (bot && config.telegram.approvalChatId) {
       const trunc = messageText.length > 200 ? messageText.substring(0, 200) + '...' : messageText;
-      try { await bot.sendMessage(config.telegram.approvalChatId, `⚠️ 返信生成に失敗しました。chat.line.bizで手動対応してください。\n\n👤 ${userName}様:\n${trunc}\n\nエラー: ${err.message}`); } catch (e2) {}
+      // クレジット切れは全生成が止まる重大事象なので、通常の失敗と区別して知らせる
+      const isCredit = /credit balance/i.test(err.message);
+      const body = isCredit
+        ? `🚨 Anthropic APIのクレジット残高が切れています\n\nチャージされるまでBotの返信生成はすべて停止します。\nconsole.anthropic.com → Plans & Billing でチャージしてください(Auto-reloadの有効化を推奨)。\n\nお客様からのメッセージは記録されており、chat.line.bizから手動対応できます。\n\n👤 ${userName}様:\n${trunc}`
+        : `⚠️ 返信生成に失敗しました。chat.line.bizで手動対応してください。\n\n👤 ${userName}様:\n${trunc}\n\nエラー: ${err.message}`;
+      try { await bot.sendMessage(config.telegram.approvalChatId, body); } catch (e2) {}
     }
     return;
   }
