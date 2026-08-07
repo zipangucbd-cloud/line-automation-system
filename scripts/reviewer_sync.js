@@ -322,15 +322,13 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       '要注意': { checkbox: p.caution },
     };
     if (p.prods.size) props['提供商品'] = { multi_select: [...p.prods].map((n) => ({ name: n })) };
-    // 初回=1回目ブロックの発送日、最終=値のある一番右のブロックの発送日(ギフ回数優先)
-    const bd = p.blockDates.filter((d) => d);
-    if (bd.length) {
-      props['初回提供日'] = { date: { start: bd[0] } };
-      props['最終提供日'] = { date: { start: bd[bd.length - 1] } };
-    } else if (p.giftDates.length) {
-      const sorted = [...p.giftDates].sort();
-      props['初回提供日'] = { date: { start: sorted[0] } };
-      props['最終提供日'] = { date: { start: sorted[sorted.length - 1] } };
+    // 初回/最終提供日は両シートの発送日を統合して決める。
+    // 発送管理シート(ギフティング)は発送のたびに記入されるため、ギフ回数に未転記の
+    // 最新の発送が載っていることがある(実測: 統合で82人の日付が修正された)。
+    const allDates = [...p.blockDates.filter((d) => d), ...p.giftDates].sort();
+    if (allDates.length) {
+      props['初回提供日'] = { date: { start: allDates[0] } };
+      props['最終提供日'] = { date: { start: allDates[allDates.length - 1] } };
     }
     const tokki = [p.tokki, ...new Set(p.cautionWhy)].filter(Boolean).join(' / ');
     const opt = {
