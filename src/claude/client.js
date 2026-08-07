@@ -142,4 +142,31 @@ ${text}`;
   return JSON.parse(m[0]);
 }
 
-module.exports = { generateReply, parseWinners };
+// レビュー完了時にスタッフが自由に書いた補足(例「4200 エロ強 顔出しあり」)を項目に振り分ける
+async function parseEvaluationNote(text) {
+  const prompt = `次はSNS投稿レビューを確認したスタッフのメモです。該当する項目だけをJSONで返してください。
+
+【項目】
+- impressions: インプレッション数。「4200」「1.5万」「12k」等の表記はそのまま文字列で
+- genre: エロ強 / エロ弱 / 一般人 / インフルエンサー のいずれか
+- face: 顔出しの有無。「顔出しあり」→"あり"、「顔なし」→"なし"
+- shadowban: 「シャドバン」「規制されてる」→"シャドバン"、「健全」「なってない」→"健全"
+- followers: フォロワー数の記述。「499以下」「1000以上」「万垢」等
+- eval_note: 上のどれにも当てはまらない補足(投稿が上手い、写真が良い等)
+
+【出力】
+JSONのみ。該当しない項目はキーごと省略。説明文は不要。
+例: {"impressions":"4200","genre":"エロ強","face":"あり"}
+
+【入力】
+${text}`;
+  const response = await client.messages.create({
+    model: config.claude.model,
+    max_tokens: 500,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  const m = response.content[0].text.match(/\{[\s\S]*\}/);
+  return m ? JSON.parse(m[0]) : {};
+}
+
+module.exports = { generateReply, parseWinners, parseEvaluationNote };

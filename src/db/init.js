@@ -38,7 +38,9 @@ function initDb() {
   `);
   // 既存DBへのカラム追加マイグレーション
   const wcols = db.prepare('PRAGMA table_info(winners)').all().map(c => c.name);
-  const addCols = [['shipped_at', 'DATETIME'], ['arrived_at', 'DATETIME'], ['review_due', 'DATE'], ['reviewed_at', 'DATETIME'], ['last_followup_at', 'DATETIME']];
+  // 後半5列は投稿を見た人間の判断。スプレッドシートで蓄積してきた分析資産をBot側でも引き継ぐため。
+  const addCols = [['shipped_at', 'DATETIME'], ['arrived_at', 'DATETIME'], ['review_due', 'DATE'], ['reviewed_at', 'DATETIME'], ['last_followup_at', 'DATETIME'],
+    ['eval', 'TEXT'], ['impressions', 'TEXT'], ['genre', 'TEXT'], ['face', 'TEXT'], ['shadowban', 'TEXT'], ['followers', 'TEXT'], ['eval_note', 'TEXT']];
   for (const [name, type] of addCols) {
     if (!wcols.includes(name)) db.exec(`ALTER TABLE winners ADD COLUMN ${name} ${type}`);
   }
@@ -137,10 +139,30 @@ function applyWinnerEvents({ lineUserId, events }) {
   }
   return applied.length ? { xId: w.x_id, applied } : null;
 }
+// 投稿を見た人間の判断(評価・インプ数・ジャンル等)を記録する。
+// スプレッドシートに手入力していた分析項目を、レビュー完了の場でTelegramから受け取る。
+function saveWinnerEvaluation({ winnerId, fields }) {
+  const allow = ['eval', 'impressions', 'genre', 'face', 'shadowban', 'followers', 'eval_note'];
+  const sets = [], vals = [];
+  for (const k of allow) {
+    if (fields[k] !== undefined && fields[k] !== null && fields[k] !== '') { sets.push(`${k} = ?`); vals.push(String(fields[k])); }
+  }
+  if (!sets.length) return null;
+  vals.push(winnerId);
+  db.prepare(`UPDATE winners SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(...vals);
+  return db.prepare('SELECT * FROM winners WHERE id = ?').get(winnerId);
+}
+function getWinnerByLineUser(lineUserId) {
+  return db.prepare("SELECT * FROM winners WHERE line_user_id = ? ORDER BY created_at DESC LIMIT 1").get(lineUserId);
+}
+// レビュー実績のある当選者(実績マスターへ合流させる対象)
+function listReviewedWinners() {
+  return db.prepare("SELECT * FROM winners WHERE reviewed_at IS NOT NULL OR eval IS NOT NULL").all();
+}
 function linkWinnerToLine({ winnerId, lineUserId }) {
   db.prepare(`UPDATE winners SET line_user_id = ?, status = CASE WHEN status = 'pending' THEN 'contacted' ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(lineUserId, winnerId);
 }
 function saveKnowledgeGap({ userId, gap, approvalId }) { db.prepare('INSERT INTO knowledge_gaps (user_id, gap, approval_id) VALUES (?, ?, ?)').run(userId, gap, approvalId); }
 function resolveKnowledgeGaps(userId) { db.prepare('UPDATE knowledge_gaps SET resolved = 1 WHERE user_id = ? AND resolved = 0').run(userId); }
 function listKnowledgeGaps() { return db.prepare('SELECT * FROM knowledge_gaps WHERE resolved = 0 ORDER BY created_at DESC').all(); }
-module.exports = { applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+module.exports = { saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };

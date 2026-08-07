@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getBot } = require('./bot');
-const { generateReply, parseWinners } = require('../claude/client');
+const { generateReply, parseWinners, parseEvaluationNote } = require('../claude/client');
 const { buildWinnerContext } = require('../utils/winner_match');
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -9,6 +9,7 @@ const pendingApprovals = new Map();
 const tgMsgToApproval = new Map();
 const lastFeedback = new Map();       // 承認ID -> 直近の修正指示(承認後に知識化を提案するため)
 const rejectFeedbackWait = new Map(); // 却下理由を尋ねたメッセージID -> 対象
+const evalNoteWait = new Map();       // 評価の補足を尋ねたメッセージID -> winnerId
 let deps = {};
 function setup(d) { deps = d; setupCallbacks(); }
 // 受信バッファ: 連続して届いたメッセージ・画像をまとめて1つの返信案にする
@@ -80,6 +81,8 @@ async function flushInbox(userId) {
   try {
     const r = deps.applyWinnerEvents && deps.applyWinnerEvents({ lineUserId: userId, events });
     if (r) { eventNote = `\n📌 進捗を記録: ${r.applied.join(' / ')} (@${r.xId})`; logger.info(`Winner events: ${r.applied.join(',')}`); }
+    // レビュー完了を記録したら、投稿の評価をこの場で聞く(スプレッドシートに手入力していた分析項目の代替)
+    if (r && r.applied.includes('レビュー完了')) askEvaluation(userId, r.xId).catch((e) => logger.error('Ask eval failed:', e.message));
   } catch (err) { logger.error('Event apply failed:', err.message); }
   const id = Date.now().toString();
   const p = { userId, userName, reply, stage, eventNote, messageText, customerData: customer, history, winnerInfo, images, tgMsgId: null };
@@ -128,6 +131,26 @@ function removeLearned(index) {
     fs.writeFileSync(LEARNED_PATH, lines.join('\n'), 'utf-8');
     return removed;
   } catch (e) { logger.error('Remove learned failed:', e.message); return null; }
+}
+
+// レビュー完了時に投稿の評価を尋ねる。スプレッドシートに手入力していた分析項目を
+// 判断した瞬間に受け取り、実績マスターへ引き継ぐための入口。
+const EVAL_CHOICES = [['非常に良い', 'vg'], ['良い', 'g'], ['ポジより', 'p'], ['良くない', 'n']];
+const EVAL_BY_CODE = Object.fromEntries(EVAL_CHOICES.map(([label, code]) => [code, label]));
+async function askEvaluation(lineUserId, xId) {
+  const bot = getBot();
+  if (!bot || !config.telegram.approvalChatId) return;
+  const w = deps.getWinnerByLineUser && deps.getWinnerByLineUser(lineUserId);
+  if (!w) return;
+  // 発送からレビューまでの日数は自動で出せるので聞かない
+  let speed = '';
+  if (w.shipped_at && w.reviewed_at) {
+    const d = Math.round((new Date(w.reviewed_at + 'Z') - new Date(w.shipped_at + 'Z')) / 86400000);
+    if (Number.isFinite(d) && d >= 0) speed = `\n(発送からレビューまで ${d}日)`;
+  }
+  await bot.sendMessage(config.telegram.approvalChatId,
+    `📝 @${xId} のレビュー投稿を確認しました${speed}\n\n投稿の評価を選んでください(実績マスターに蓄積されます)`,
+    { reply_markup: { inline_keyboard: [EVAL_CHOICES.map(([label, code]) => ({ text: label, callback_data: `ev:${w.id}:${code}` }))] } });
 }
 
 // 社内向けの目印。顧客に送る文面には絶対に含めてはならない。
@@ -276,6 +299,21 @@ function setupCallbacks() {
       if (!config.telegram.approvalChatId || String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
       // /で始まるものは専用のコマンドハンドラが処理するため、ここでは扱わない(二重処理の防止)
       if (/^\s*\//.test(msg.text)) return;
+
+      // 投稿評価の補足(インプ数・ジャンル等)の受け取り
+      if (msg.reply_to_message && evalNoteWait.has(msg.reply_to_message.message_id)) {
+        const winnerId = evalNoteWait.get(msg.reply_to_message.message_id);
+        evalNoteWait.delete(msg.reply_to_message.message_id);
+        let fields = {};
+        try { fields = await parseEvaluationNote(msg.text); }
+        catch (e) { logger.error('Parse eval note failed:', e.message); fields = { eval_note: msg.text }; }
+        try {
+          const w = deps.saveWinnerEvaluation({ winnerId, fields });
+          const shown = Object.entries(fields).map(([k, v]) => `${{ impressions: 'インプ', genre: 'ジャンル', face: '顔出し', shadowban: 'シャドバン', followers: 'フォロワー', eval_note: '備考' }[k] || k}: ${v}`).join(' / ');
+          await bot.sendMessage(msg.chat.id, shown ? `📊 記録しました — ${shown}${w ? `\n(@${w.x_id})` : ''}` : '⚠️ 項目を読み取れませんでした');
+        } catch (e) { logger.error('Save eval note failed:', e.message); }
+        return;
+      }
 
       // 却下理由の受け取り(Botが尋ねたメッセージへの返信)
       if (msg.reply_to_message && rejectFeedbackWait.has(msg.reply_to_message.message_id)) {
@@ -469,6 +507,22 @@ function setupCallbacks() {
     const who = q.from ? (q.from.first_name || q.from.username || '担当者') : '担当者';
 
     // 「今後もこうする」= 直前の修正指示を永続知識にする(ワンタップ学習)
+    // 投稿評価のボタン(ev:winnerId:code)
+    if (action === 'ev') {
+      const [, winnerId, code] = q.data.split(':');
+      const label = EVAL_BY_CODE[code];
+      if (!label) { await bot.answerCallbackQuery(q.id, { text: '不明な評価' }); return; }
+      try { deps.saveWinnerEvaluation({ winnerId: Number(winnerId), fields: { eval: label } }); }
+      catch (e) { logger.error('Save eval failed:', e.message); }
+      await bot.answerCallbackQuery(q.id, { text: `評価「${label}」を記録しました` });
+      try { await bot.editMessageText(`${q.message.text}\n\n✅ 評価: ${label} (${who})`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {}
+      try {
+        const sent = await bot.sendMessage(q.message.chat.id,
+          `インプ数や補足があれば、このメッセージに返信で教えてください\n(例: 4200 エロ強 顔出しあり シャドバンなし)\n\n不要ならスルーでOKです`);
+        if (sent && sent.message_id) evalNoteWait.set(sent.message_id, Number(winnerId));
+      } catch (e) {}
+      return;
+    }
     if (action === 'k') {
       const fb = lastFeedback.get(id);
       if (!fb) { await bot.answerCallbackQuery(q.id, { text: '対象が見つかりません' }); return; }
