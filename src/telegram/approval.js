@@ -124,6 +124,16 @@ function removeLearned(index) {
   } catch (e) { logger.error('Remove learned failed:', e.message); return null; }
 }
 
+// 社内向けの目印。顧客に送る文面には絶対に含めてはならない。
+const MARKER_RE = /[[［]\s*(要人間判断|知識不足|要確認)\s*[:：]?[^\]］]*[\]］]\s*/g;
+function extractMarkers(text) {
+  return [...String(text).matchAll(MARKER_RE)].map((m) => m[0].replace(/^\s*[[［]|[\]］]\s*$/g, '').trim());
+}
+// 送信直前に必ず通す。マーカーを取り除き、先頭に残った空行も整える。
+function sanitizeForCustomer(text) {
+  return String(text).replace(MARKER_RE, '').replace(/^\s+/, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 // 返信案に含まれる [知識不足: ...] を拾ってDBに残す。運営が知識を足して再生成するための記録。
 function recordGaps({ userId, reply, approvalId }) {
   try {
@@ -140,9 +150,9 @@ async function sendApproval(id, p, isRevision) {
   if (!bot || !config.telegram.approvalChatId) return;
   const trunc = p.messageText.length > 500 ? p.messageText.substring(0, 500) + '...' : p.messageText;
   const head = (isRevision ? `🔄 修正版 承認依頼 #${id}` : `🤖 承認依頼 #${id}`) + (p.stage ? `  [${p.stage}]` : '');
-  const gaps = [...String(p.reply).matchAll(/\[知識不足:\s*([^\]]+)\]/g)].map((m) => m[1].trim());
-  const alert = gaps.length
-    ? `\n\n🚨 このまま送らないでください — Botに以下の知識がありません:\n${gaps.map((g) => `・${g}`).join('\n')}\n(Claudeに教えて知識を追加してから、✏️返信で再生成してください)`
+  const markers = extractMarkers(p.reply);
+  const alert = markers.length
+    ? `\n\n🚨 Botが判断できていません — 内容を確認してください:\n${markers.map((g) => `・${g}`).join('\n')}\n(✏️返信で情報を伝えると作り直します。この目印は送信時に自動で取り除かれます)`
     : '';
   // 修正で作り直した場合は、その指示を今後も反映するか(=永続知識にするか)をこの場で選べるようにする
   const fb = lastFeedback.get(id);
@@ -478,8 +488,14 @@ function setupCallbacks() {
     const p = pendingApprovals.get(id);
     if (!p) { await bot.answerCallbackQuery(q.id, { text: '期限切れ' }); return; }
     if (action === 'a') {
-      const ok = await deps.sendLineReply(p.userId, p.reply);
-      if (ok) { deps.saveConversation({ userId: p.userId, direction: 'outgoing', content: p.reply }); deps.updateApproval({ approvalId: id, status: 'approved', finalReply: p.reply }); }
+      // 社内向けマーカーを取り除いてから送信する(顧客に内部メモが届く事故の防止)
+      const outgoing = sanitizeForCustomer(p.reply);
+      if (!outgoing) {
+        await bot.answerCallbackQuery(q.id, { text: '⚠️ 送信できる本文がありません' });
+        return;
+      }
+      const ok = await deps.sendLineReply(p.userId, outgoing);
+      if (ok) { deps.saveConversation({ userId: p.userId, direction: 'outgoing', content: outgoing }); deps.updateApproval({ approvalId: id, status: 'approved', finalReply: outgoing }); }
       await bot.answerCallbackQuery(q.id, { text: ok ? '✅ 送信完了' : '❌ 失敗' });
       try { await bot.editMessageText(`✅ 承認・送信済 (${who})\n\n${q.message.text}`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {}
 
