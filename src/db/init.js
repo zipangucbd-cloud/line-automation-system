@@ -108,10 +108,39 @@ function completeWinnerByXid(xId) {
 }
 function findWinnerByXid(xId) { return db.prepare('SELECT * FROM winners WHERE lower(x_id) = lower(?) ORDER BY created_at DESC LIMIT 1').get(xId); }
 function findWinnerByLineUser(lineUserId) { return db.prepare('SELECT * FROM winners WHERE line_user_id = ? ORDER BY created_at DESC LIMIT 1').get(lineUserId); }
+// 会話から確定した進捗イベントを当選者レコードに反映する。
+// 既に記録済みの項目は上書きしない(会話で何度も話題に出るため、最初の確定日を残す)。
+function applyWinnerEvents({ lineUserId, events }) {
+  if (!lineUserId || !events) return null;
+  const w = db.prepare("SELECT * FROM winners WHERE line_user_id = ? AND status NOT IN ('done','cancelled') ORDER BY created_at DESC LIMIT 1").get(lineUserId);
+  if (!w) return null;
+  const applied = [];
+  if (events.shipped && !w.shipped_at) {
+    db.prepare("UPDATE winners SET shipped_at = CURRENT_TIMESTAMP, status = 'shipped', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(w.id);
+    applied.push('発送日');
+  }
+  if (events.arrived && !w.arrived_at) {
+    db.prepare("UPDATE winners SET arrived_at = CURRENT_TIMESTAMP, status = 'arrived', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(w.id);
+    applied.push('到着日');
+  }
+  if (events.reviewed && !w.reviewed_at) {
+    db.prepare("UPDATE winners SET reviewed_at = CURRENT_TIMESTAMP, status = 'reviewed', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(w.id);
+    applied.push('レビュー完了');
+  }
+  if (typeof events.review_due === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(events.review_due)) {
+    db.prepare('UPDATE winners SET review_due = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(events.review_due, w.id);
+    applied.push(`レビュー予定日=${events.review_due}`);
+  }
+  if (typeof events.product === 'string' && ['gummy', 'cream'].includes(events.product) && !w.chosen_product) {
+    db.prepare('UPDATE winners SET chosen_product = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(events.product, w.id);
+    applied.push(`選択商品=${events.product}`);
+  }
+  return applied.length ? { xId: w.x_id, applied } : null;
+}
 function linkWinnerToLine({ winnerId, lineUserId }) {
   db.prepare(`UPDATE winners SET line_user_id = ?, status = CASE WHEN status = 'pending' THEN 'contacted' ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(lineUserId, winnerId);
 }
 function saveKnowledgeGap({ userId, gap, approvalId }) { db.prepare('INSERT INTO knowledge_gaps (user_id, gap, approval_id) VALUES (?, ?, ?)').run(userId, gap, approvalId); }
 function resolveKnowledgeGaps(userId) { db.prepare('UPDATE knowledge_gaps SET resolved = 1 WHERE user_id = ? AND resolved = 0').run(userId); }
 function listKnowledgeGaps() { return db.prepare('SELECT * FROM knowledge_gaps WHERE resolved = 0 ORDER BY created_at DESC').all(); }
-module.exports = { addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+module.exports = { applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };

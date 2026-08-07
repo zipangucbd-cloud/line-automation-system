@@ -53,8 +53,8 @@ async function flushInbox(userId) {
   catch (err) { logger.error('Winner match error:', err.message); }
   const history = deps.getRecentConversations(userId, 30).reverse().map(c => ({ role: c.direction === 'incoming' ? 'user' : 'assistant', content: c.content }));
 
-  let reply, stage = null;
-  try { ({ reply, stage } = await generateReply({ userName, messageText, conversationHistory: history, customerData: customer, winnerInfo, images })); }
+  let reply, stage = null, events = {};
+  try { ({ reply, stage, events } = await generateReply({ userName, messageText, conversationHistory: history, customerData: customer, winnerInfo, images })); }
   catch (err) {
     logger.error('Reply generation failed:', err.message);
     const bot = getBot();
@@ -75,8 +75,14 @@ async function flushInbox(userId) {
       }
     } catch (err) { logger.error('Stage save failed:', err.message); }
   }
+  // 会話から確定した進捗(発送・到着・レビュー完了・予定日・商品選択)を当選者レコードに記録する
+  let eventNote = '';
+  try {
+    const r = deps.applyWinnerEvents && deps.applyWinnerEvents({ lineUserId: userId, events });
+    if (r) { eventNote = `\n📌 進捗を記録: ${r.applied.join(' / ')} (@${r.xId})`; logger.info(`Winner events: ${r.applied.join(',')}`); }
+  } catch (err) { logger.error('Event apply failed:', err.message); }
   const id = Date.now().toString();
-  const p = { userId, userName, reply, stage, messageText, customerData: customer, history, winnerInfo, images, tgMsgId: null };
+  const p = { userId, userName, reply, stage, eventNote, messageText, customerData: customer, history, winnerInfo, images, tgMsgId: null };
   pendingApprovals.set(id, p);
   deps.saveApproval({ approvalId: id, userId, generatedReply: reply, status: 'pending' });
   recordGaps({ userId, reply, approvalId: id });
@@ -159,7 +165,7 @@ async function sendApproval(id, p, isRevision) {
   const learnNote = isRevision && fb
     ? `\n\n💡 この修正「${fb}」を今後も反映しますか?\n　→ 下の🧠を押すとBotが覚えます(押さなければ今回だけ)`
     : '';
-  const text = `${head}${alert}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
+  const text = `${head}${alert}${p.eventNote || ''}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
   const rows = [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]];
   if (isRevision && fb) rows.push([{ text: '🧠 この修正を今後も反映する', callback_data: `k:${id}` }]);
   const opts = { reply_markup: { inline_keyboard: rows } };
@@ -221,9 +227,9 @@ async function handleRevisionRequest(msg) {
   }
 
   logger.info(`Revision requested for #${approvalId}: ${feedback.substring(0, 80)}`);
-  let newReply, newStage = null;
+  let newReply, newStage = null, newEvents = {};
   try {
-    ({ reply: newReply, stage: newStage } = await generateReply({ userName: p.userName, messageText: p.messageText, conversationHistory: p.history, customerData: p.customerData, winnerInfo: p.winnerInfo, images: p.images, previousReply: p.reply, feedback }));
+    ({ reply: newReply, stage: newStage, events: newEvents } = await generateReply({ userName: p.userName, messageText: p.messageText, conversationHistory: p.history, customerData: p.customerData, winnerInfo: p.winnerInfo, images: p.images, previousReply: p.reply, feedback }));
   } catch (err) {
     logger.error('Revision generation failed:', err.message);
     try { await bot.sendMessage(msg.chat.id, `❌ 再生成に失敗しました: ${err.message}`); } catch (e) {}
@@ -237,6 +243,7 @@ async function handleRevisionRequest(msg) {
     try { await bot.editMessageText(`✏️ 修正指示を反映 → 🔄 #${newId}\n\n指示: ${feedback}`, { chat_id: msg.chat.id, message_id: p.tgMsgId }); } catch (e) {}
   }
   if (newStage) { try { deps.upsertCustomer({ userId: p.userId, stage: newStage }); } catch (e) {} }
+  try { deps.applyWinnerEvents && deps.applyWinnerEvents({ lineUserId: p.userId, events: newEvents }); } catch (e) {}
   // 「今後もこうする」の提案に使うため、修正指示を新しい承認IDに引き継ぐ
   if (!learnMatch) lastFeedback.set(newId, feedback.replace(/\n+/g, ' ').trim().slice(0, 200));
   const np = { userId: p.userId, userName: p.userName, reply: newReply, stage: newStage, messageText: p.messageText, customerData: p.customerData, history: p.history, winnerInfo: p.winnerInfo, images: p.images, tgMsgId: null };

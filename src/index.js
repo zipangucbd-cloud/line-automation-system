@@ -18,6 +18,7 @@ async function main() {
     upsertCustomer: dbModule.upsertCustomer,
     saveKnowledgeGap: dbModule.saveKnowledgeGap,
     addWinner: dbModule.addWinner,
+    applyWinnerEvents: dbModule.applyWinnerEvents,
     winnerDashboard: dbModule.winnerDashboard,
     autoCompleteWinners: dbModule.autoCompleteWinners,
     completeWinnerByXid: dbModule.completeWinnerByXid,

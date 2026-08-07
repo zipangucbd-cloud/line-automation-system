@@ -32,7 +32,16 @@ const STAGE_INSTRUCTION = `
 <<STAGE:ステージID>>
 
 ステージIDは次から選びます:
-S1_問診回答待ち / S1_問診不足追撃 / S2_本人確認待ち / S3_事前確認待ち / S4_オファー提示済 / S4_Amazon資格確認 / S4_LP案内済 / S4_カートスクショ待ち / S5_注文番号待ち / S5_発送済 / S6_到着連絡待ち / S6_撮影説明済 / S6_読了確認待ち / S7_レビュー下書き待ち / S7_下書き確認済 / S8_EC投稿待ち / S8_完了報告待ち / S9_キャッシュバック済 / S9_連鎖案内済 / 完了 / 対応保留`;
+S1_問診回答待ち / S1_問診不足追撃 / S2_本人確認待ち / S3_事前確認待ち / S4_オファー提示済 / S4_Amazon資格確認 / S4_LP案内済 / S4_カートスクショ待ち / S5_注文番号待ち / S5_発送済 / S6_到着連絡待ち / S6_撮影説明済 / S6_読了確認待ち / S7_レビュー下書き待ち / S7_下書き確認済 / S8_EC投稿待ち / S8_完了報告待ち / S9_キャッシュバック済 / S9_連鎖案内済 / 完了 / 対応保留
+
+さらに、今回のやり取りで**進捗上の出来事が確定した場合のみ**、STAGE行の下に該当する行を追加してください(該当しなければ何も書かない):
+<<EVENT:shipped>>   … 発送手続きが完了した/発送した旨を伝えた
+<<EVENT:arrived>>   … 商品が届いたと相手から連絡があった
+<<EVENT:reviewed>>  … レビュー投稿が完了したと確認できた
+<<EVENT:review_due=YYYY-MM-DD>> … 相手がレビュー投稿の予定日を答えた(「来週末」等の曖昧な表現は書かない。日付が特定できる場合のみ)
+<<EVENT:product=gummy>> または <<EVENT:product=cream>> … グミかクリームかの選択が確定した
+
+これらは社内の進捗記録に使われ、顧客には送信されません。推測では書かず、会話から明確に確定した場合のみ記載してください。`;
 
 async function generateReply({ userName, messageText, conversationHistory = [], customerData = null, winnerInfo = null, images = [], previousReply = null, feedback = null }) {
   try {
@@ -84,8 +93,15 @@ async function generateReply({ userName, messageText, conversationHistory = [], 
     // ステージ申告を抽出し、顧客に送る本文からは取り除く
     const m = raw.match(/<<STAGE:([^>]+)>>/);
     const stage = m ? m[1].trim() : null;
-    const reply = raw.replace(/\n*<<STAGE:[^>]+>>\s*$/, '').trim();
-    return { reply, stage };
+    // 進捗イベント(発送・到着・レビュー完了・予定日・商品選択)を抽出する
+    const events = {};
+    for (const em of raw.matchAll(/<<EVENT:([^>]+)>>/g)) {
+      const [key, value] = em[1].split('=').map((x) => x.trim());
+      events[key] = value || true;
+    }
+    // 社内向けの制御行は顧客に送る本文から必ず取り除く
+    const reply = raw.replace(/<<(?:STAGE|EVENT):[^>]*>>/g, '').replace(/\n{3,}/g, '\n\n').trim();
+    return { reply, stage, events };
   } catch (err) {
     logger.error('Claude API error:', err.message);
     throw err;
