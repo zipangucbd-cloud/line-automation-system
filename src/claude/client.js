@@ -3,7 +3,28 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 const logger = require('../utils/logger');
-const client = new Anthropic({ apiKey: config.claude.apiKey });
+
+// ── 生成ルートは二段構え ─────────────────────────────────────
+// 1) Maxプラン(Claude Agent SDK + CLAUDE_CODE_OAUTH_TOKEN) … 定額枠内。通常はこちら(追加課金なし)
+// 2) Anthropic API直叩き(ANTHROPIC_API_KEY / 従量課金)      … Max枠超過・障害時の保険
+const OAUTH_TOKEN = (process.env.CLAUDE_CODE_OAUTH_TOKEN || '').trim();
+const apiClient = config.claude.apiKey ? new Anthropic({ apiKey: config.claude.apiKey }) : null;
+
+// Agent SDKはESM配布のため動的importで読む(初回呼び出し時に1度だけ)
+let agentQueryPromise = null;
+function getAgentQuery() {
+  if (!OAUTH_TOKEN) return Promise.resolve(null);
+  if (!agentQueryPromise) {
+    agentQueryPromise = import('@anthropic-ai/claude-agent-sdk')
+      .then((m) => m.query)
+      .catch((e) => {
+        logger.error('claude-agent-sdk の読み込みに失敗(API直叩きで続行):', e.message);
+        return null;
+      });
+  }
+  return agentQueryPromise;
+}
+
 const systemPromptPath = path.join(__dirname, '../knowledge/system_prompt.md');
 const learnedPath = path.join(__dirname, '../knowledge/learned.md');
 
@@ -43,6 +64,76 @@ S1_問診回答待ち / S1_問診不足追撃 / S2_本人確認待ち / S3_事�
 
 これらは社内の進捗記録に使われ、顧客には送信されません。推測では書かず、会話から明確に確定した場合のみ記載してください。`;
 
+// Maxプラン経由。Claude Codeの実行エンジンを子プロセス起動するため数秒のオーバーヘッドがある
+async function callViaMax(system, userContent) {
+  const agentQuery = await getAgentQuery();
+  if (!agentQuery) throw new Error('Agent SDKが利用できません(トークン未設定または読み込み失敗)');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 240000);
+  try {
+    const env = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN };
+    delete env.ANTHROPIC_API_KEY; // 残っているとMaxではなく従量課金キーが優先されてしまう
+    async function* input() {
+      yield { type: 'user', message: { role: 'user', content: userContent }, parent_tool_use_id: null, session_id: 'linebot' };
+    }
+    const q = agentQuery({
+      prompt: input(),
+      options: {
+        model: config.claude.model,
+        systemPrompt: system,
+        customSystemPrompt: system, // 旧版SDKでの同義キー(有効な方が使われる)
+        allowedTools: [],
+        maxTurns: 1,
+        settingSources: [],
+        cwd: path.join(__dirname, '../..'),
+        env,
+        abortController: controller,
+      },
+    });
+    let text = null;
+    for await (const msg of q) {
+      if (msg.type === 'result') {
+        if (msg.subtype === 'success') text = msg.result;
+        else throw new Error(`生成が完了しませんでした(${msg.subtype})`);
+      }
+    }
+    if (!text) throw new Error('Agent SDKから結果が返りませんでした');
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Anthropic API直叩き(従量課金)。Max障害時の保険
+async function callViaApi(system, userContent, maxTokens) {
+  if (!apiClient) throw new Error('ANTHROPIC_API_KEYが未設定です');
+  const response = await apiClient.messages.create({
+    model: config.claude.model,
+    max_tokens: maxTokens,
+    ...(system ? { system } : {}),
+    messages: [{ role: 'user', content: userContent }],
+  });
+  return response.content[0].text;
+}
+
+// Max優先で呼び、失敗したらAPI(従量課金)で1回だけ再試行する
+async function runClaude({ system, userContent, maxTokens = 2048, label = 'claude' }) {
+  if (OAUTH_TOKEN) {
+    try {
+      const text = await callViaMax(system, userContent);
+      logger.info(`[claude:${label}] route=max`);
+      return text;
+    } catch (err) {
+      logger.error(`[claude:${label}] Maxルート失敗: ${err.message}`);
+      if (!apiClient) throw err;
+      logger.info(`[claude:${label}] API(従量課金)ルートで再試行します`);
+    }
+  }
+  const text = await callViaApi(system, userContent, maxTokens);
+  logger.info(`[claude:${label}] route=api`);
+  return text;
+}
+
 async function generateReply({ userName, messageText, conversationHistory = [], customerData = null, winnerInfo = null, images = [], previousReply = null, feedback = null }) {
   try {
     let contextInfo = '';
@@ -53,12 +144,23 @@ async function generateReply({ userName, messageText, conversationHistory = [], 
     }
     if (winnerInfo) contextInfo += `\n\n【当選者照合】\n${winnerInfo}\n`;
 
-    const messages = [];
-    for (const msg of conversationHistory) messages.push({ role: msg.role, content: msg.content });
+    // 会話履歴はテキストに畳んで1メッセージで渡す(Max/APIどちらのルートでも同じ挙動にするため)
+    let historyText = '';
+    if (conversationHistory.length) {
+      const lines = conversationHistory.map((m) => (m.role === 'user' ? `お客様: ${m.content}` : `あなた(過去の返信): ${m.content}`));
+      historyText = `【これまでの会話履歴(古い順)】\n${lines.join('\n----\n')}\n\n`;
+    }
 
-    // 画像が届いた場合は全枚数をまとめて渡し、返信は必ず1つだけ作らせる
-    // (Amazonキャッシュバックでは検索結果画面とカート画面の2枚が続けて届く)
+    // 承認者からの修正指示による再生成
+    let revisionText = '';
+    if (previousReply && feedback) {
+      revisionText = `\n\n【直前のあなたの返信案】\n${previousReply}\n\n【運営(承認者)からの修正指示 — これは${userName}様からのメッセージではありません】\n直前の返信案を次の指示に従って書き直し、修正後の返信文のみを出力してください:\n${feedback}`;
+    }
+
+    let userContent;
     if (images && images.length) {
+      // 画像は全枚数をまとめて渡し、返信は必ず1つだけ作らせる
+      // (Amazonキャッシュバックでは検索結果画面とカート画面の2枚が続けて届く)
       const content = images.map((img) => ({
         type: 'image',
         source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
@@ -66,30 +168,25 @@ async function generateReply({ userName, messageText, conversationHistory = [], 
       const many = images.length > 1;
       content.push({
         type: 'text',
-        text: `【${userName}様から画像が${images.length}枚届きました】${messageText ? `\n(同時に届いたメッセージ: ${messageText})` : ''}\n`
+        text: historyText
+          + `【${userName}様から画像が${images.length}枚届きました】${messageText ? `\n(同時に届いたメッセージ: ${messageText})` : ''}\n`
           + `${many ? 'これらの画像は一連のものです。**全ての画像を確認したうえで、返信は1通だけ**作成してください。画像ごとに分けて返信しないこと。\n' : ''}`
           + `各画像が何のスクリーンショットかを判断し(Xのプロフィール画面／Amazonの検索結果画面／Amazonのカート画面／レビュー投稿の下書き／商品の到着写真／その他)、フロー上の適切な次の一手を返信案にしてください。\n`
           + `${many ? '例えば「Amazonの検索結果画面」と「カート画面」の2枚が揃っていれば、カート追加まで完了しているので購入手続きの案内に進みます。片方しか無い場合は不足している方を依頼してください。\n' : ''}`
-          + `判断に迷う場合や、求めていたものと違う画像の場合は、返信案の冒頭に「[要人間判断]」を付けてください。${contextInfo}`,
+          + `判断に迷う場合や、求めていたものと違う画像の場合は、返信案の冒頭に「[要人間判断]」を付けてください。${contextInfo}${revisionText}`,
       });
-      messages.push({ role: 'user', content });
+      userContent = content;
     } else {
-      messages.push({ role: 'user', content: `【${userName}様からのメッセージ】\n${messageText}${contextInfo}` });
+      userContent = `${historyText}【${userName}様からのメッセージ】\n${messageText}${contextInfo}${revisionText}`;
     }
 
-    // 承認者からの修正指示による再生成: 前回案をassistantとして積み、指示を明示的に運営発として渡す
-    if (previousReply && feedback) {
-      messages.push({ role: 'assistant', content: previousReply });
-      messages.push({ role: 'user', content: `【運営(承認者)からの修正指示 — これは${userName}様からのメッセージではありません】\n直前のあなたの返信案を、次の指示に従って書き直してください。修正後の返信文のみを出力してください。\n\n${feedback}` });
-    }
-
-    const response = await client.messages.create({
-      model: config.claude.model,
-      max_tokens: 2048,
+    const raw = await runClaude({
       system: buildSystemPrompt() + STAGE_INSTRUCTION,
-      messages,
+      userContent,
+      maxTokens: 2048,
+      label: 'reply',
     });
-    const raw = response.content[0].text;
+
     // ステージ申告を抽出し、顧客に送る本文からは取り除く
     const m = raw.match(/<<STAGE:([^>]+)>>/);
     const stage = m ? m[1].trim() : null;
@@ -107,6 +204,9 @@ async function generateReply({ userName, messageText, conversationHistory = [], 
     throw err;
   }
 }
+
+const EXTRACT_SYSTEM = 'あなたはデータ抽出アシスタントです。指示された形式のJSONのみを出力し、説明文は書きません。';
+
 // スタッフがTelegramに貼った当選者リストを解釈して構造化する
 // 書式を覚えてもらう必要がないよう、自由な書き方を許容する
 async function parseWinners(text) {
@@ -131,12 +231,7 @@ JSONのみを出力してください。説明文は不要です。
 
 【入力】
 ${text}`;
-  const response = await client.messages.create({
-    model: config.claude.model,
-    max_tokens: 4096,
-    messages: [{ role: 'user', content: prompt }],
-  });
-  const raw = response.content[0].text.trim();
+  const raw = await runClaude({ system: EXTRACT_SYSTEM, userContent: prompt, maxTokens: 4096, label: 'parseWinners' });
   const m = raw.match(/\{[\s\S]*\}/);
   if (!m) throw new Error('解析結果を読み取れませんでした');
   return JSON.parse(m[0]);
@@ -160,12 +255,8 @@ JSONのみ。該当しない項目はキーごと省略。説明文は不要。
 
 【入力】
 ${text}`;
-  const response = await client.messages.create({
-    model: config.claude.model,
-    max_tokens: 500,
-    messages: [{ role: 'user', content: prompt }],
-  });
-  const m = response.content[0].text.match(/\{[\s\S]*\}/);
+  const raw = await runClaude({ system: EXTRACT_SYSTEM, userContent: prompt, maxTokens: 500, label: 'parseEval' });
+  const m = raw.match(/\{[\s\S]*\}/);
   return m ? JSON.parse(m[0]) : {};
 }
 
