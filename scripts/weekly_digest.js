@@ -108,23 +108,8 @@ async function analyze() {
   } catch (e) { console.error('Analysis failed:', e.message); }
 
   const text = lines.join('\n');
-  // 週次ジョブがネットワークの一時的な不調で黙って落ちないように再試行する
-  let lastErr;
-  for (let i = 0; i < 4; i++) {
-    try {
-      const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text }),
-      }).then((x) => x.json());
-      if (!r.ok) throw new Error(JSON.stringify(r).slice(0, 200));
-      console.log(new Date().toISOString(), 'weekly digest sent');
-      return;
-    } catch (e) {
-      lastErr = e;
-      console.error(`send retry ${i + 1}/4: ${e.message}`);
-      await new Promise((res) => setTimeout(res, 5000 * (i + 1)));
-    }
-  }
-  throw lastErr;
+  // この回線はTelegram宛のHTTP/1.1系TLSがDPI遮断されるため、HTTP/2クライアント(リトライ内蔵)で送る
+  const { tgCallRetry } = require('./tg_h2');
+  await tgCallRetry(token, 'sendMessage', { chat_id: chatId, text }, 4);
+  console.log(new Date().toISOString(), 'weekly digest sent');
 })().catch((e) => { console.error('Weekly digest error:', e.message); process.exit(1); });

@@ -31,11 +31,7 @@ const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_APPROVAL_CHAT_ID;
 if (!token || !chatId) { console.error('Telegram credentials missing'); process.exit(1); }
 
-fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ chat_id: chatId, text: lines.join('\n') }),
-}).then(r => r.json()).then(r => {
-  if (!r.ok) { console.error('Telegram send failed:', JSON.stringify(r)); process.exit(1); }
-  console.log('Daily report sent');
-}).catch(e => { console.error('Daily report error:', e.message); process.exit(1); });
+const { tgCallRetry } = require('./tg_h2');
+tgCallRetry(token, 'sendMessage', { chat_id: chatId, text: lines.join('\n') }, 4)
+  .then(() => console.log('Daily report sent'))
+  .catch((e) => { console.error('Daily report error:', e.message); process.exit(1); });
