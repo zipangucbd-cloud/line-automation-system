@@ -206,6 +206,17 @@ async function sendApproval(id, p, isRevision) {
   try {
     const sent = await bot.sendMessage(config.telegram.approvalChatId, text, opts);
     if (sent && sent.message_id) { p.tgMsgId = sent.message_id; tgMsgToApproval.set(sent.message_id, id); try { deps.linkTelegramMessage && deps.linkTelegramMessage({ approvalId: id, tgMsgId: sent.message_id }); } catch (e) {} }
+    // 受信画像(本人確認スクショ等)をカードに添付し、承認者が目視で真偽確認できるようにする
+    if (p.images && p.images.length) {
+      for (let i = 0; i < p.images.length; i++) {
+        try {
+          await bot.sendPhoto(config.telegram.approvalChatId, Buffer.from(p.images[i].base64, 'base64'), {
+            caption: `📎 受信画像 ${i + 1}/${p.images.length}(#${id} の判断材料)`,
+            ...(sent && sent.message_id ? { reply_to_message_id: sent.message_id } : {}),
+          }, { filename: `image_${i + 1}.jpg`, contentType: p.images[i].mediaType || 'image/jpeg' });
+        } catch (e) { logger.error('カードへの画像添付に失敗:', e.message); }
+      }
+    }
   } catch (err) { logger.error('Telegram send failed:', err.message); }
 }
 // 承認依頼メッセージへのTelegram返信 = 修正指示 → Claude再生成 → 修正版の承認依頼を発行
