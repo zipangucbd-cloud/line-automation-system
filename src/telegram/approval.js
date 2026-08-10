@@ -3,6 +3,7 @@ const path = require('path');
 const { getBot } = require('./bot');
 const { generateReply, parseWinners, parseEvaluationNote } = require('../claude/client');
 const { buildWinnerContext } = require('../utils/winner_match');
+const { negativeInfo } = require('../utils/negative_list');
 const config = require('../config');
 const logger = require('../utils/logger');
 const pendingApprovals = new Map();
@@ -370,17 +371,20 @@ function setupCallbacks() {
       await bot.sendMessage(msg.chat.id, '⚠️ 当選者を読み取れませんでした。@IDと提供内容が含まれているか確認してください。');
       return;
     }
-    const lines = []; const dups = []; let ng = 0;
+    const lines = []; const dups = []; const negs = []; let ng = 0;
     for (const w of list) {
       if (!w.x_id || !/^[A-Za-z0-9_]{1,15}$/.test(w.x_id)) { ng++; continue; }
       try {
         const r = deps.addWinner({ xId: w.x_id, campaign: w.campaign || '(企画名なし)', offer: w.offer || 'unknown', tier: w.tier === 'strong' ? 'strong' : 'normal', notes: w.notes || null });
         lines.push(`・@${w.x_id} — ${OFFER_LABEL[w.offer] || w.offer}${w.tier === 'strong' ? ' 🔶強' : ''}`);
         if (r.duplicate) dups.push(`@${w.x_id}(既存:「${r.duplicate.campaign}」が未完了)`);
+        const neg = negativeInfo(w.x_id);
+        if (neg) negs.push(`・@${w.x_id}${neg.name ? '(' + neg.name + ')' : ''} — 「良くない」評価${neg.negCount}回: ${neg.history.slice(-2).join(' / ')}`);
       } catch (e) { logger.error('addWinner failed:', e.message); ng++; }
     }
     const parts = [`✅ ${lines.length}名を当選者リストに登録しました (登録: ${who})`, '', `企画: ${list[0].campaign || '(企画名なし)'}`, ...lines];
     if (dups.length) parts.push('', '⚠️ 同じIDで未完了の案件があります(重ねて登録しました):', ...dups.map((d) => `・${d}`));
+    if (negs.length) parts.push('', '🚨【警告】過去にネガティブレビュー(「良くない」評価)の人が含まれています!', ...negs, '選出ミスの可能性があります。取り消す場合は大塚さん(司令塔)に伝えてください。');
     if (parsed.warnings && parsed.warnings.length) parts.push('', '📌 確認してください:', ...parsed.warnings.map((w) => `・${w}`));
     if (ng) parts.push('', `⚠️ ${ng}件は読み取れず登録できませんでした`);
     parts.push('', 'この方たちがLINEでXのIDを名乗ると、自動で照合されて企画に沿った案内が始まります。');

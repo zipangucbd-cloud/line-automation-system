@@ -290,6 +290,29 @@ async function fetchRetry(url, opts = {}, tries = 4) {
   for (const p of people.values()) { if (p.fol) stats.fol++; if (p.sb) stats.sb++; if (p.channel) stats.ch++; if (p.blockDates.filter(Boolean).length || p.giftDates.length) stats.dates++; }
   console.log(`coverage: channel=${stats.ch}, shadowban=${stats.sb}, follower=${stats.fol}, dates=${stats.dates}`);
 
+  // ===== ネガレビュー歴リスト(当選者の再選出ミス警告用) =====
+  // 「良くない」評価が1回でもある人を data/negative_reviewers.json に常備する。
+  // add_winner.js / Telegramの当選者登録・LINE照合がこれと突き合わせて警告を出す
+  {
+    const fs = require('fs');
+    const path = require('path');
+    const negatives = {};
+    for (const [xid, p] of people) {
+      if (p.evals.includes('良くない')) {
+        negatives[xid] = {
+          name: p.name || '',
+          negCount: p.evals.filter((e) => e === '良くない').length,
+          history: p.history.length ? p.history : p.evals.map((e) => '(' + e + ')'),
+          flags: [...new Set(p.cautionWhy)].slice(0, 5),
+        };
+      }
+    }
+    fs.writeFileSync(path.join(__dirname, '../data/negative_reviewers.json'),
+      JSON.stringify({ updatedAt: new Date().toISOString(), count: Object.keys(negatives).length, negatives }, null, 1));
+    console.log(`negative reviewers: ${Object.keys(negatives).length} -> data/negative_reviewers.json`);
+    if (process.argv.includes('--negatives-only')) { console.log('negatives-only: Notion同期はスキップ'); process.exit(0); }
+  }
+
   // ===== Notion upsert =====
   const existing = new Map();
   let cursor;

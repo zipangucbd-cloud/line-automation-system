@@ -6,3 +6,4 @@ data/
 .DS_Store
 setup.sh
 data/backups/
+data/negative_reviewers.json

@@ -3,6 +3,14 @@
 
 const PLACEHOLDER = /^[_＿\-ー―—\s]*$/;
 
+const { negativeInfo } = require('./negative_list');
+// 過去に「良くない」評価がある人なら、照合コンテキストに警告を足す
+function negNote(xId) {
+  const n = negativeInfo(xId);
+  if (!n) return '';
+  return `\n🚨【要注意】@${xId} は過去に「良くない」評価が${n.negCount}回あります(${n.history.slice(-2).join(' / ')})。再選出ミスの可能性があるため、提供の案内に進む前に運営の確認が必要です。返信案の冒頭に[要人間判断]を付けてください。`;
+}
+
 // 問診テンプレの回答欄から各SNSのIDを取り出す。
 // テンプレは「X：____ / Instagram：____」の形なので、記入されていない欄は除外する。
 function extractSnsIds(text) {
@@ -29,7 +37,7 @@ function buildWinnerContext({ deps, messageText, customer, userId }) {
   // 既にLINEユーザーへ紐付け済みの当選者がいれば最優先
   const linked = deps.findWinnerByLineUser(userId);
   if (linked) {
-    return `照合OK(紐付け済み): @${linked.x_id} は「${linked.campaign}」の当選者です。提供内容: ${linked.offer} / 区分: ${linked.tier} / 状態: ${linked.status}${linked.chosen_product ? ' / 選択商品: ' + linked.chosen_product : ''}。この企画・提供内容に沿ってフローを進めてください。`;
+    return `照合OK(紐付け済み): @${linked.x_id} は「${linked.campaign}」の当選者です。提供内容: ${linked.offer} / 区分: ${linked.tier} / 状態: ${linked.status}${linked.chosen_product ? ' / 選択商品: ' + linked.chosen_product : ''}。この企画・提供内容に沿ってフローを進めてください。${negNote(linked.x_id)}`;
   }
 
   const ids = extractSnsIds(messageText);
@@ -42,7 +50,7 @@ function buildWinnerContext({ deps, messageText, customer, userId }) {
     if (winner) {
       deps.linkWinnerToLine({ winnerId: winner.id, lineUserId: userId });
       deps.upsertCustomer({ userId, xHandle: claimed });
-      return `照合OK: 申告ID @${claimed} は「${winner.campaign}」の当選者リストに登録されています。提供内容: ${winner.offer} / 区分: ${winner.tier}。本人確認(プロフィールのスクリーンショット)が未完了ならS2を先に行い、完了後にこの提供内容でフローを進めてください。`;
+      return `照合OK: 申告ID @${claimed} は「${winner.campaign}」の当選者リストに登録されています。提供内容: ${winner.offer} / 区分: ${winner.tier}。本人確認(プロフィールのスクリーンショット)が未完了ならS2を先に行い、完了後にこの提供内容でフローを進めてください。${negNote(winner.x_id)}`;
     }
   }
 
