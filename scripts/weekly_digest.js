@@ -3,7 +3,7 @@
 // launchd (com.user.line.weeklydigest) から毎週月曜9時30分に実行される
 require('dotenv').config();
 const Database = require('better-sqlite3');
-const Anthropic = require('@anthropic-ai/sdk');
+const { runRaw } = require('../src/claude/client');
 const fs = require('fs');
 const path = require('path');
 
@@ -84,19 +84,56 @@ async function analyze() {
     revisedSamples.length ? `【修正された返信案(抜粋)】\n${revisedSamples.map((r) => (r.generated_reply || '').slice(0, 200)).join('\n---\n')}` : '',
   ].filter(Boolean).join('\n\n');
   if (!material) return null;
-  const anth = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 3 });
-  const res = await anth.messages.create({
-    model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929',
-    max_tokens: 900,
-    messages: [{
-      role: 'user',
-      content: `あなたはLINE応対Botの運用改善アドバイザーです。以下は今週このBotが人間に修正・却下された記録です。\n`
-        + `繰り返し起きている問題を最大3つ挙げ、それぞれに「Botに覚えさせるべき具体的な一文」を提案してください。\n`
-        + `提案する一文は、そのまま /覚えて に貼れる形にしてください。\n`
-        + `該当がなければ「特筆すべき傾向はありません」とだけ答えてください。前置きや締めの挨拶は不要です。\n\n${material}`,
-    }],
+  const text = await runRaw({
+    prompt: `あなたはLINE応対Botの運用改善アドバイザーです。以下は今週このBotが人間に修正・却下された記録です。\n`
+      + `繰り返し起きている問題を最大3つ挙げ、それぞれに「Botに覚えさせるべき具体的な一文」を提案してください。\n`
+      + `提案する一文は、そのまま /覚えて に貼れる形にしてください。\n`
+      + `該当がなければ「特筆すべき傾向はありません」とだけ答えてください。前置きや締めの挨拶は不要です。\n\n${material}`,
+    maxTokens: 900,
+    label: 'weeklyDigest',
   });
-  return res.content[0].text.trim();
+  return text.trim();
+}
+
+// 1週間分の生ログをAIに読ませ、一貫性・フロー・ルール違反・機械的異常を監査する(週1回のみ)
+async function auditWeek() {
+  const convo = db.prepare(`SELECT id, substr(user_id,-6) u, direction d, content, timestamp ts FROM conversations WHERE timestamp >= ${W} ORDER BY id`).all();
+  if (!convo.length) return null;
+  const rows = convo.slice(-600).map((r) => `${r.id}|${r.u}|${r.d === 'incoming' ? '客' : 'Bot'}|${r.ts}|${(r.content || '').replace(/\n/g, ' ').slice(0, 200)}`);
+  let rules = '';
+  try { rules = fs.readFileSync(path.join(__dirname, '../src/knowledge/learned.md'), 'utf-8').slice(0, 4000); } catch (e) {}
+  const winners = db.prepare(`SELECT x_id, campaign, offer, status, chosen_product, line_user_id FROM winners WHERE status NOT IN ('done','cancelled')`).all()
+    .map((w) => `@${w.x_id}|${w.campaign}|${w.offer}|選択:${w.chosen_product || '-'}|LINE:${w.line_user_id ? String(w.line_user_id).slice(-6) : '未紐付け'}`);
+  const prompt = `あなたはLINE応対Botの運用監査役です。以下は直近7日間の全会話ログ(id|顧客ID下6桁|発言者|時刻|本文先頭200字)、当選者リスト、運営ルールです。
+
+【正しいフロー順(これに沿っているものは問題ではない)】
+友だち追加→問診(健康確認)→SNS IDのテキスト申告→当選者照合→本人確認スクショ→事前確認(パートナーか1人か/2ヶ月以内レビュー可否/配送先氏名/セットなら商品選択)→提供プラン2択(送料負担 or Amazonキャッシュバック)→Amazon資格確認→LP案内→カートスクショ→注文→発送→到着→レビュー
+※「事前確認がプラン提示より先」が正しい順序です。
+
+【判定の注意】
+- 運営ルールには [日付] が付いています。各会話行の時刻とルールの日付を必ず比較し、ルールの日付より前の会話には適用しないでください(日付前の違反として指摘するのは誤りです)。
+- 本人確認スクリーンショットの依頼は、SNS IDのテキスト申告とは別の必須ゲートです。ID申告済みの相手へのスクショ依頼を「重複確認」として指摘しないでください。
+- 友だち追加(再追加含む)の直後に問診が自動送信される仕様のため、再追加による問診の再送は異常ではありません。
+- 確信が持てない指摘・推測に基づく指摘は書かないでください。
+
+次の4種類の問題「だけ」を探して列挙してください:
+1. 一貫性のない案内(似た状況の顧客に異なる説明・条件を出している)
+2. フロー逸脱(本人確認・当選者照合が済む前に提供内容・商品選択・購入の案内に進んでいる)
+3. 運営ルール違反(下記ルールに反する送信文)
+4. 機械的な異常(同文の重複送信、客のメッセージへの応答漏れ、不自然な放置)
+
+出力形式: 1件につき「[種別] 会話id◯◯: 根拠(1行) → 推奨対応(1行)」。確信が持てないものは書かない。問題がなければ「問題なし」とだけ。前置き・締めの文は不要。
+
+【当選者リスト】
+${winners.join('\n') || '(なし)'}
+
+【運営ルール(抜粋)】
+${rules}
+
+【会話ログ】
+${rows.join('\n')}`;
+  const out = await runRaw({ prompt, maxTokens: 1200, label: 'weeklyAudit' });
+  return out ? out.trim() : null;
 }
 
 (async () => {
@@ -106,8 +143,17 @@ async function analyze() {
       lines.push('', '━━━━━━━━━━', '💡 今週の傾向と改善案', '', insight);
     }
   } catch (e) { console.error('Analysis failed:', e.message); }
+  try {
+    const audit = await auditWeek();
+    if (audit && !/^問題なし/.test(audit)) {
+      lines.push('', '━━━━━━━━━━', '🔍 AI監査(会話ログの異常確認)', '', audit);
+    } else if (audit) {
+      lines.push('', '🔍 AI監査: 問題なし ✅');
+    }
+  } catch (e) { console.error('Audit failed:', e.message); }
 
   const text = lines.join('\n');
+  if (process.argv.includes('--dry')) { console.log(text); return; }
   // この回線はTelegram宛のHTTP/1.1系TLSがDPI遮断されるため、HTTP/2クライアント(リトライ内蔵)で送る
   const { tgCallRetry } = require('./tg_h2');
   await tgCallRetry(token, 'sendMessage', { chat_id: chatId, text }, 4);

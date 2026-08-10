@@ -83,7 +83,7 @@ async function callViaMax(system, userContent) {
         systemPrompt: system,
         customSystemPrompt: system, // 旧版SDKでの同義キー(有効な方が使われる)
         allowedTools: [],
-        maxTurns: 1,
+        maxTurns: 3, // 1だと稀にツール呼び出しを試みた時点で打ち切られる(error_max_turns)
         settingSources: [],
         cwd: path.join(__dirname, '../..'),
         env,
@@ -260,4 +260,9 @@ ${text}`;
   return m ? JSON.parse(m[0]) : {};
 }
 
-module.exports = { generateReply, parseWinners, parseEvaluationNote };
+// 分析ジョブ(週次ダイジェスト等)用の汎用呼び出し。Max優先+API保険はrunClaudeに準ずる
+async function runRaw({ system = null, prompt, maxTokens = 1500, label = 'raw' }) {
+  return runClaude({ system, userContent: prompt, maxTokens, label });
+}
+
+module.exports = { generateReply, parseWinners, parseEvaluationNote, runRaw };
