@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { getBot } = require('./bot');
 const { generateReply, parseWinners, parseEvaluationNote } = require('../claude/client');
-const { buildWinnerContext } = require('../utils/winner_match');
+const { buildWinnerContext, offerStatusLine } = require('../utils/winner_match');
 const { negativeInfo } = require('../utils/negative_list');
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -56,6 +56,8 @@ async function flushInbox(userId) {
   const history = deps.getRecentConversations(userId, 30).reverse().map(c => ({ role: c.direction === 'incoming' ? 'user' : 'assistant', content: c.content }));
 
   let reply, stage = null, events = {};
+  // 照合材料が無い場合もその事実を明示し、S3以降へ進ませない(スクショだけでID申告された事故の再発防止)
+  if (!winnerInfo) winnerInfo = '照合未完了: この方はまだ当選者リスト・再提供リストと照合できていません。SNS IDのテキスト申告を受けて照合が取れるまで、S3以降(事前確認・提供プラン提示・商品選択・LP案内)には進まないでください。必要ならIDのテキスト申告を丁寧に依頼してください。';
   try { ({ reply, stage, events } = await generateReply({ userName, messageText, conversationHistory: history, customerData: customer, winnerInfo, images })); }
   catch (err) {
     logger.error('Reply generation failed:', err.message);
@@ -194,7 +196,10 @@ async function sendApproval(id, p, isRevision) {
   const learnNote = isRevision && fb
     ? `\n\n💡 この修正「${fb}」を今後も反映しますか?\n　→ 下の🧠を押すとBotが覚えます(押さなければ今回だけ)`
     : '';
-  const text = `${head}${alert}${p.eventNote || ''}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
+  // 何の当選者/再提供で、今どの商品を提供中か(セットなら次)を常時表示する
+  let provLine = '';
+  try { const w = deps.findWinnerByLineUser(p.userId); if (w) provLine = `\n📦 ${offerStatusLine(w)}`; } catch (e) {}
+  const text = `${head}${provLine}${alert}${p.eventNote || ''}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
   const rows = [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]];
   if (isRevision && fb) rows.push([{ text: '🧠 この修正を今後も反映する', callback_data: `k:${id}` }]);
   const opts = { reply_markup: { inline_keyboard: rows } };
@@ -564,13 +569,15 @@ function setupCallbacks() {
         await bot.answerCallbackQuery(q.id, { text: '⚠️ 送信できる本文がありません' });
         return;
       }
+      // 送信前に消し込む: ボタンの二度押し・コールバック二重配送による二重送信を防ぐ(失敗時は戻す)
+      pendingApprovals.delete(id);
       const ok = await deps.sendLineReply(p.userId, outgoing);
       if (ok) { deps.saveConversation({ userId: p.userId, direction: 'outgoing', content: outgoing }); deps.updateApproval({ approvalId: id, status: 'approved', finalReply: outgoing }); }
-      await bot.answerCallbackQuery(q.id, { text: ok ? '✅ 送信完了' : '❌ 失敗' });
-      try { await bot.editMessageText(`✅ 承認・送信済 (${who})\n\n${q.message.text}`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {}
+      else { pendingApprovals.set(id, p); }
+      await bot.answerCallbackQuery(q.id, { text: ok ? '✅ 送信完了' : '❌ 送信失敗(もう一度押してください)' });
+      if (ok) { try { await bot.editMessageText(`✅ 承認・送信済 (${who})\n\n${q.message.text}`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {} }
 
-      pendingApprovals.delete(id);
-      if (p.tgMsgId) tgMsgToApproval.delete(p.tgMsgId);
+      if (ok && p.tgMsgId) tgMsgToApproval.delete(p.tgMsgId);
     } else if (action === 'r') {
       deps.updateApproval({ approvalId: id, status: 'rejected', finalReply: null });
       await bot.answerCallbackQuery(q.id, { text: '❌ 却下' });

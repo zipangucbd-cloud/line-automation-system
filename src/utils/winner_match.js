@@ -33,11 +33,27 @@ function extractXId(text) {
   return extractSnsIds(text).x;
 }
 
+// この人が「何の当選者/再提供」で「今どの商品を提供中か」(セットなら次に何が控えるか)を1行にまとめる。
+// 承認カードの常時表示と、Claudeへの生成コンテキストの両方で使う。
+function offerStatusLine(w) {
+  const isReoffer = /再提供|再オファー/.test(`${w.campaign || ''}`);
+  const isSet = /セット|順次/.test(`${w.offer || ''}`);
+  const cur = w.chosen_product || (isSet ? '未選択(まずグミかクリームどちらから始めるか選んでもらう)' : w.offer);
+  let s = isReoffer
+    ? `【区分】再提供(当選企画ではない) / 提供中の商品: ${cur}`
+    : `【区分】${w.campaign}の当選者 / 提供内容: ${w.offer} / 提供中の商品: ${cur}`;
+  if (isSet && w.chosen_product) {
+    const next = /cream|クリーム/i.test(w.chosen_product) ? 'ORIGINAL(グミ)' : 'CREAM(クリーム)';
+    s += ` / この商品のレビュー完了後に${next}を案内する(同時案内・同時購入は絶対禁止)`;
+  }
+  return s;
+}
+
 function buildWinnerContext({ deps, messageText, customer, userId }) {
   // 既にLINEユーザーへ紐付け済みの当選者がいれば最優先
   const linked = deps.findWinnerByLineUser(userId);
   if (linked) {
-    return `照合OK(紐付け済み): @${linked.x_id} は「${linked.campaign}」の当選者です。提供内容: ${linked.offer} / 区分: ${linked.tier} / 状態: ${linked.status}${linked.chosen_product ? ' / 選択商品: ' + linked.chosen_product : ''}。この企画・提供内容に沿ってフローを進めてください。${negNote(linked.x_id)}`;
+    return `照合OK(紐付け済み): @${linked.x_id} は「${linked.campaign}」の当選者です。提供内容: ${linked.offer} / 区分: ${linked.tier} / 状態: ${linked.status}${linked.chosen_product ? ' / 選択商品: ' + linked.chosen_product : ''}。この企画・提供内容に沿ってフローを進めてください。\n${offerStatusLine(linked)}${negNote(linked.x_id)}`;
   }
 
   const ids = extractSnsIds(messageText);
@@ -50,7 +66,7 @@ function buildWinnerContext({ deps, messageText, customer, userId }) {
     if (winner) {
       deps.linkWinnerToLine({ winnerId: winner.id, lineUserId: userId });
       deps.upsertCustomer({ userId, xHandle: claimed });
-      return `照合OK: 申告ID @${claimed} は「${winner.campaign}」の当選者リストに登録されています。提供内容: ${winner.offer} / 区分: ${winner.tier}。本人確認(プロフィールのスクリーンショット)が未完了ならS2を先に行い、完了後にこの提供内容でフローを進めてください。${negNote(winner.x_id)}`;
+      return `照合OK: 申告ID @${claimed} は「${winner.campaign}」の当選者リストに登録されています。提供内容: ${winner.offer} / 区分: ${winner.tier}。本人確認(プロフィールのスクリーンショット)が未完了ならS2を先に行い、完了後にこの提供内容でフローを進めてください。\n${offerStatusLine(winner)}${negNote(winner.x_id)}`;
     }
   }
 
@@ -59,4 +75,4 @@ function buildWinnerContext({ deps, messageText, customer, userId }) {
   return `照合NG: 申告されたID(${shown})は当選者リストに未登録です。提供案内には進まず、返信案の冒頭に「[要人間判断] 当選者リスト未登録のID申告」を付けて保留してください。`;
 }
 
-module.exports = { extractXId, extractSnsIds, buildWinnerContext };
+module.exports = { extractXId, extractSnsIds, buildWinnerContext, offerStatusLine };

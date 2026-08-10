@@ -7,7 +7,10 @@ async function initTelegram() {
   if (!config.telegram.botToken) { logger.warn('Telegram bot token not set'); return null; }
   bot = new TelegramBot(config.telegram.botToken, {
     polling: { autoStart: true, params: { timeout: 30 } },
-    request: { agentOptions: { keepAlive: true, family: 4 } }
+    request: { agentOptions: { keepAlive: true, family: 4 } },
+    // TG_API_BASE(.env)があればローカルHTTP/2プロキシ経由で通信する。
+    // この回線はTelegram宛のHTTP/1.1系TLSがDPI遮断されるため(scripts/tg_proxy.js参照)
+    ...(process.env.TG_API_BASE ? { baseApiUrl: process.env.TG_API_BASE } : {}),
   });
   bot.on('polling_error', (err) => logger.error('Telegram polling error:', err.message));
   bot.onText(/\/start/, (msg) => bot.sendMessage(msg.chat.id, 'Bot is ready.\nChat ID: ' + msg.chat.id));
