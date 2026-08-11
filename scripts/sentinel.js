@@ -9,7 +9,20 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { runRaw } = require('../src/claude/client');
-const { tgCall } = require('./tg_h2');
+
+// Telegram通信は全てローカルのHTTP/2プロキシ(127.0.0.1:8081)経由。
+// h2直叩きはDPIの気まぐれで不安定なため使わない(Bot本体と同じ実証済み経路に統一)
+async function tgCall(_token, method, payload, timeoutMs = 30000) {
+  const res = await fetch(`http://127.0.0.1:8081/bot${TOKEN}/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload || {}),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const j = await res.json();
+  if (!j.ok) throw new Error('TG API error: ' + JSON.stringify(j).slice(0, 180));
+  return j.result;
+}
 
 const TOKEN = (process.env.TELEGRAM_SENTINEL_TOKEN || '').trim();
 const APPROVAL_CHAT = String(process.env.TELEGRAM_APPROVAL_CHAT_ID || '');
@@ -196,7 +209,7 @@ async function handleUpdate(u) {
   journal('Sentinel起動');
   while (true) {
     try {
-      const updates = await tgCall(TOKEN, 'getUpdates', { offset: state.offset + 1, timeout: 25, allowed_updates: ['message', 'callback_query'] }, 40000);
+      const updates = await tgCall(TOKEN, 'getUpdates', { offset: state.offset + 1, timeout: 15, allowed_updates: ['message', 'callback_query'] }, 30000);
       for (const u of updates || []) {
         state.offset = Math.max(state.offset, u.update_id);
         try { await handleUpdate(u); } catch (e) { log('handleUpdate error:', e.message); }
