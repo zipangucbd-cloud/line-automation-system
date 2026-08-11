@@ -747,7 +747,8 @@ function setupCallbacks() {
       // 却下は「Botの案が使えなかった」という最も重要な学習信号。理由を拾う
       try {
         const sent = await bot.sendMessage(q.message.chat.id,
-          `❓ 却下の理由を教えてください(このメッセージに返信)\n\n・何がダメだったか\n・実際にLINEで何と返信したか\n\nどちらでも構いません。今後の改善に使います。\n(不要ならスルーでOK)`);
+          `❓ 却下の理由を教えてください(このメッセージに返信)\n\n・何がダメだったか\n・実際にLINEで何と返信したか\n\nどちらでも構いません。今後の改善に使います。\n(不要ならスルーでOK)`,
+          { reply_to_message_id: q.message.message_id });
         if (sent && sent.message_id) rejectFeedbackWait.set(sent.message_id, { approvalId: id, userId: p.userId });
       } catch (e) {}
       pendingApprovals.delete(id);
