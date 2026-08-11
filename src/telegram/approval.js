@@ -65,7 +65,7 @@ async function flushInbox(userId) {
       if (bot && old.p.tgMsgId && config.telegram.approvalChatId) {
         try {
           await bot.editMessageText(
-            `⏩ ${userName}様から追加のメッセージが届いたため、このカードは無効になりました。\n直後に届く新しいカード1枚で、全メッセージ分をまとめて対応してください。`,
+            `⏩ ${cardName(userId, userName)}様から追加のメッセージが届いたため、このカードは無効になりました。\n直後に届く新しいカード1枚で、全メッセージ分をまとめて対応してください。`,
             { chat_id: config.telegram.approvalChatId, message_id: old.p.tgMsgId });
         } catch (e2) {}
       }
@@ -215,6 +215,16 @@ function recordGaps({ userId, reply, approvalId }) {
     return found;
   } catch (e) { logger.error('Gap record failed:', e.message); return []; }
 }
+// 当選者と紐付いている場合はX IDを併記する(スタッフが「Xの名前+ID」で個体識別する運用に合わせ、
+// chat.line.bizでの手動リネームなしでも誰か分かるようにする)。Telegram表示専用 — 生成プロンプトには使わない
+function cardName(userId, userName) {
+  try {
+    const w = deps.findWinnerByLineUser && deps.findWinnerByLineUser(userId);
+    if (w && w.x_id) return `${userName}(@${w.x_id})`;
+  } catch (e) {}
+  return userName;
+}
+
 async function sendApproval(id, p, isRevision) {
   const bot = getBot();
   if (!bot || !config.telegram.approvalChatId) return;
@@ -232,7 +242,7 @@ async function sendApproval(id, p, isRevision) {
   // 何の当選者/再提供で、今どの商品を提供中か(セットなら次)を常時表示する
   let provLine = '';
   try { const w = deps.findWinnerByLineUser(p.userId); if (w) provLine = `\n📦 ${offerStatusLine(w)}`; } catch (e) {}
-  const text = `${head}${provLine}${alert}${p.eventNote || ''}\n\n👤 ${p.userName}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
+  const text = `${head}${provLine}${alert}${p.eventNote || ''}\n\n👤 ${cardName(p.userId, p.userName)}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
   const rows = [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]];
   if (isRevision && fb) rows.push([{ text: '🧠 この修正を今後も反映する', callback_data: `k:${id}` }]);
   const opts = { reply_markup: { inline_keyboard: rows } };
@@ -244,7 +254,7 @@ async function sendApproval(id, p, isRevision) {
       for (let i = 0; i < p.images.length; i++) {
         try {
           await bot.sendPhoto(config.telegram.approvalChatId, Buffer.from(p.images[i].base64, 'base64'), {
-            caption: `📎 ${p.userName}様からの受信画像 ${i + 1}/${p.images.length}(#${id} の判断材料)`,
+            caption: `📎 ${cardName(p.userId, p.userName)}様からの受信画像 ${i + 1}/${p.images.length}(#${id} の判断材料)`,
             ...(sent && sent.message_id ? { reply_to_message_id: sent.message_id } : {}),
           }, { filename: `image_${i + 1}.jpg`, contentType: p.images[i].mediaType || 'image/jpeg' });
         } catch (e) { logger.error('カードへの画像添付に失敗:', e.message); }
@@ -338,7 +348,7 @@ async function proposeFollowup({ userId, userName, text, label }) {
   deps.saveApproval({ approvalId: id, userId, generatedReply: text, status: 'pending' });
   const bot = getBot();
   if (!bot || !config.telegram.approvalChatId) return false;
-  const msg = `📋 フォローアップ提案 #${id}\n\n👤 ${p.userName} — ${label}\n\n📝 送信文面:\n${text}\n\n━━━━━━━━━━\n✅で送信 / ✏️修正はこのメッセージに返信で指示`;
+  const msg = `📋 フォローアップ提案 #${id}\n\n👤 ${cardName(p.userId, p.userName)} — ${label}\n\n📝 送信文面:\n${text}\n\n━━━━━━━━━━\n✅で送信 / ✏️修正はこのメッセージに返信で指示`;
   const opts = { reply_markup: { inline_keyboard: [[{ text: '✅ 承認して送信', callback_data: `a:${id}` }, { text: '❌ 見送り', callback_data: `r:${id}` }]] } };
   try {
     const sent = await bot.sendMessage(config.telegram.approvalChatId, msg, opts);
