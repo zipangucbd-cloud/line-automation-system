@@ -190,7 +190,7 @@ async function startT2Draft(request, chatId, requester) {
         journal(`Tier2起草完了: ${res.branch} files=${(res.files || []).join(',')}`);
         await tgCall(TOKEN, 'sendMessage', {
           chat_id: OWNER,
-          text: `🛠 Tier2適用の承認依頼\n\n依頼: ${request}\n依頼者: ${requester}\n変更ファイル:\n${(res.files || []).map((f) => '・' + f).join('\n')}\n\n要約:\n${res.summary || '(なし)'}`,
+          text: `${res.verify && res.verify.startsWith('⚠️') ? '🛠⚠️ Tier2適用の承認依頼(自動監査で指摘あり — 差分をよく確認してください)' : '🛠 Tier2適用の承認依頼'}\n\n依頼: ${request}\n依頼者: ${requester}\n変更ファイル:\n${(res.files || []).map((f) => '・' + f).join('\n')}\n\n要約:\n${res.summary || '(なし)'}\n\n🔎 自動監査: ${res.verify || '(なし)'}`,
           reply_markup: { inline_keyboard: [[
             { text: '✅ 適用する', callback_data: `t2:apply:${res.branch}` },
             { text: '❌ 破棄する', callback_data: `t2:discard:${res.branch}` },

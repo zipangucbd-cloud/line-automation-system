@@ -99,8 +99,21 @@ ${knowledge}
     const diff = sh('git diff --cached', WT);
     const diffFile = `/tmp/t2_diff_${branch.replace('/', '_')}.patch`;
     fs.writeFileSync(diffFile, diff);
+
+    // 自動監査: 起草した本人ではない別のClaudeに、差分が依頼の範囲内かを検査させる
+    // (起草エージェントが隣接行を壊しつつ「変更していない」と主張する事故が実際に起きたため)
+    let verify = '';
+    try {
+      const { runRaw } = require('../src/claude/client');
+      verify = (await runRaw({
+        system: 'あなたはコードレビューの監査担当です。簡潔な日本語で答えます。',
+        prompt: `次の「依頼」に対して「差分」が過不足なく対応しているかを監査してください。\n- 依頼と無関係な行の変更・削除・文字の欠落(単語が短くなっている等)がないか、差分を1行ずつ確認\n- 問題がなければ「問題なし」とだけ出力\n- 問題があれば「⚠️」で始めて、各問題を1行ずつ列挙\n\n【依頼】\n${req}\n\n【差分】\n${diff.slice(0, 12000)}`,
+        maxTokens: 500,
+        label: 't2verify',
+      })).trim();
+    } catch (e) { verify = '(自動監査に失敗: ' + String(e.message).slice(0, 120) + ')'; }
     sh(`git commit -q -m "Tier2: ${req.replace(/["\n]/g, ' ').slice(0, 60)}"`, WT);
-    console.log(JSON.stringify({ ok: true, branch, summary: summary.slice(0, 1500), diffFile, files: files.split('\n') }));
+    console.log(JSON.stringify({ ok: true, branch, summary: summary.slice(0, 1500), diffFile, files: files.split('\n'), verify }));
   } catch (e) {
     try { sh(`git worktree remove --force ${WT} 2>/dev/null || true`); } catch (e2) {}
     console.log(JSON.stringify({ ok: false, error: String(e.message || e).slice(0, 300) }));
