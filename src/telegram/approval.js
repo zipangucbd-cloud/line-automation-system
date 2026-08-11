@@ -650,9 +650,16 @@ async function reissuePendingApprovals() {
   try { rows = deps.listPendingApprovals(3) || []; } catch (e) { logger.error('Reissue list failed:', e.message); return; }
   let n = 0;
   for (const r of rows) {
+    if (pendingApprovals.has(r.approval_id)) continue; // ボタン生存中(正常)
+    const age = Date.now() - new Date(String(r.created_at).replace(' ', 'T') + 'Z').getTime();
+    if (age < 3 * 60000) continue; // 発行直後のカードを二重発行しない
     n++;
     try {
       deps.updateApproval({ approvalId: r.approval_id, status: 'superseded', finalReply: null });
+      // 古いカードの見た目も無効化する(ボタンだけ死んで生きて見えるのを防ぐ)
+      if (r.tg_msg_id) {
+        try { await bot.editMessageText(`♻️ このカードは再発行されました。新しいカードで対応してください。`, { chat_id: config.telegram.approvalChatId, message_id: Number(r.tg_msg_id) }); } catch (e2) {}
+      }
       const customer = deps.getCustomer(r.user_id);
       const userName = (customer && customer.display_name) || 'お客様';
       const history = (deps.getRecentConversations(r.user_id, 30) || []).reverse().map((c) => ({ role: c.direction === 'incoming' ? 'user' : 'assistant', content: c.content }));
@@ -671,4 +678,47 @@ async function reissuePendingApprovals() {
   if (n) logger.info(`Reissue done: ${n}件`);
 }
 
-module.exports = { setup, handleMessage, proposeFollowup, reissuePendingApprovals };
+// ── 整合性チェック(5分ごと) ─────────────────────────────
+// 「仕組みが動いたはず」を信用せず、あるべき状態と実際を照合して自動修復する。
+// 1) DB上pendingなのにボタンが生きていないカード → 再発行
+// 2) 受信から20分〜3時間、返信もカードも無い相手 → 会話履歴から生成をやり直す(最大2回、以後は🚨警告)
+const regenAttempts = new Map(); // userId -> 試行回数
+async function reconcile() {
+  try { await reissuePendingApprovals(); } catch (e) { logger.error('Reconcile(reissue) failed:', e.message); }
+  try {
+    if (!deps.listUnansweredUsers) return;
+    const bot = getBot();
+    for (const r of deps.listUnansweredUsers() || []) {
+      const ageMs = Date.now() - new Date(String(r.last_in_at).replace(' ', 'T') + 'Z').getTime();
+      if (ageMs < 20 * 60000 || ageMs > 3 * 3600000) continue; // 手動対応済みの古い会話には触らない
+      let hasCard = false;
+      for (const pp of pendingApprovals.values()) if (pp.userId === r.user_id) { hasCard = true; break; }
+      if (hasCard || inbox.has(r.user_id)) continue;
+      const tries = regenAttempts.get(r.user_id) || 0;
+      if (tries >= 2) {
+        if (tries === 2) {
+          regenAttempts.set(r.user_id, 3);
+          if (bot && config.telegram.approvalChatId) {
+            try { await bot.sendMessage(config.telegram.approvalChatId, `🚨 整合性チェック: お客様(ID末尾${String(r.user_id).slice(-6)})への返信を自動復旧できませんでした。chat.line.bizで手動対応してください。`); } catch (e2) {}
+          }
+        }
+        continue;
+      }
+      regenAttempts.set(r.user_id, tries + 1);
+      const customer = deps.getCustomer(r.user_id);
+      const userName = (customer && customer.display_name) || 'お客様';
+      const last = deps.getLastIncoming ? deps.getLastIncoming(r.user_id) : null;
+      logger.info(`Reconcile: 未応答を検出、生成をやり直します (${userName})`);
+      // 受信は保存済みなので再保存せず、バッファに直接積んで正規の生成経路に乗せる
+      inbox.set(r.user_id, {
+        userName,
+        texts: [(last && last.content) || '(直前のメッセージはchat.line.bizを確認)'],
+        images: [],
+        firstAt: Date.now(),
+        timer: setTimeout(() => { flushInbox(r.user_id).catch((err) => logger.error('Flush error:', err.message)); }, 1500),
+      });
+    }
+  } catch (e) { logger.error('Reconcile(unanswered) failed:', e.message); }
+}
+
+module.exports = { setup, handleMessage, proposeFollowup, reissuePendingApprovals, reconcile };

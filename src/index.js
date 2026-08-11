@@ -15,6 +15,8 @@ async function main() {
     saveApproval: dbModule.saveApproval,
     updateApproval: dbModule.updateApproval,
     listPendingApprovals: dbModule.listPendingApprovals,
+    listUnansweredUsers: dbModule.listUnansweredUsers,
+    getLastIncoming: dbModule.getLastIncoming,
     getCustomer: dbModule.getCustomer,
     upsertCustomer: dbModule.upsertCustomer,
     saveKnowledgeGap: dbModule.saveKnowledgeGap,
@@ -51,7 +53,9 @@ async function main() {
   });
   const port = process.env.PORT || 3000;
   app.listen(port, () => { logger.info(`Server on port ${port}`); logger.info('Ready'); });
-  // 再起動で承認ボタンが失われたpendingカードを自動再発行する(相手が返信待ちのまま止まる事故の防止)
-  setTimeout(() => approvalFlow.reissuePendingApprovals().catch((e) => logger.error('Reissue error:', e.message)), 5000);
+  // 整合性チェック: 「あるべき状態」(pendingカードのボタン生存・受信への応答)と実際を
+  // 5分ごとに照合し、ズレていれば自動修復する。イベント発火を信用しない設計。
+  setTimeout(() => approvalFlow.reconcile().catch((e) => logger.error('Reconcile error:', e.message)), 5000);
+  setInterval(() => approvalFlow.reconcile().catch((e) => logger.error('Reconcile error:', e.message)), 5 * 60000);
 }
 main().catch(err => { logger.error('Fatal:', err.message); process.exit(1); });

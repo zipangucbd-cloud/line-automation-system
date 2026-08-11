@@ -165,9 +165,21 @@ function linkWinnerToLine({ winnerId, lineUserId }) {
 function saveKnowledgeGap({ userId, gap, approvalId }) { db.prepare('INSERT INTO knowledge_gaps (user_id, gap, approval_id) VALUES (?, ?, ?)').run(userId, gap, approvalId); }
 function resolveKnowledgeGaps(userId) { db.prepare('UPDATE knowledge_gaps SET resolved = 1 WHERE user_id = ? AND resolved = 0').run(userId); }
 function listKnowledgeGaps() { return db.prepare('SELECT * FROM knowledge_gaps WHERE resolved = 0 ORDER BY created_at DESC').all(); }
-// 再起動後の再発行用: 直近days日のpendingカードを列挙する
-function listPendingApprovals(days = 3) {
-  return db.prepare(`SELECT approval_id, user_id, generated_reply, created_at FROM approvals WHERE status = 'pending' AND created_at >= datetime('now', ?)`).all(`-${days} days`);
+// 整合性チェック用: 直近12時間で「最後の受信の後に送信が無い」ユーザーを列挙する
+function listUnansweredUsers() {
+  return db.prepare(`
+    SELECT user_id,
+           MAX(CASE WHEN direction='incoming' THEN id ELSE 0 END) AS last_in,
+           MAX(CASE WHEN direction='outgoing' THEN id ELSE 0 END) AS last_out,
+           MAX(CASE WHEN direction='incoming' THEN timestamp END) AS last_in_at
+    FROM conversations
+    WHERE timestamp >= datetime('now','-12 hours')
+    GROUP BY user_id`).all().filter((r) => r.last_in > r.last_out);
 }
 
-module.exports = { listPendingApprovals, saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+// 再起動後の再発行用: 直近days日のpendingカードを列挙する
+function listPendingApprovals(days = 3) {
+  return db.prepare(`SELECT approval_id, user_id, generated_reply, created_at, tg_msg_id FROM approvals WHERE status = 'pending' AND created_at >= datetime('now', ?)`).all(`-${days} days`);
+}
+
+module.exports = { listPendingApprovals, listUnansweredUsers, saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };

@@ -88,6 +88,9 @@ try {
   if (apiRoute) alerts.push(`従量課金ルート(route=api)の使用: ${apiRoute}件 — Max枠が詰まった可能性`);
   else if (maxFail) alerts.push(`Maxルート失敗(APIで復旧済み含む): ${maxFail}件`);
   if (poll > 60) alerts.push(`Telegramポーリングエラー多発: ${poll}件(直近ログ)`);
+  const reissued = cnt(/Reissued approval/g);
+  const regen = cnt(/未応答を検出/g);
+  if (reissued || regen) alerts.push(`自動修復の実績: カード再発行${reissued}件 / 生成やり直し${regen}件(整合性チェックが正常に働いた記録)`);
 } catch (e) {}
 
 if (alerts.length) {
