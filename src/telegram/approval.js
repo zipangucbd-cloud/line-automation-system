@@ -490,6 +490,34 @@ function setupCallbacks() {
     await bot.sendMessage(msg.chat.id, n ? `✅ @${match[2].replace(/^@/, '')} を完了にしました(一覧から外れます)` : `⚠️ @${match[2].replace(/^@/, '')} は対応中の当選者に見つかりませんでした`);
   });
 
+  // Botの自己点検: スタッフが「カードが来ない」等と感じた時にまず押す安全な復旧コマンド。
+  // 整合性チェックを即時実行し(消えたカードの再発行・未応答の生成やり直し)、状態サマリと安全な再起動ボタンを返す
+  bot.onText(/^\/(システム|system|点検)(?:@\S+)?$/, async (msg) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    let note = '';
+    try { await reconcile(); note = '✅ 整合性チェック実行済み(消えたカードや未応答があれば、直前に自動で再発行・再生成されています)'; }
+    catch (e) { note = '⚠️ 整合性チェックでエラー: ' + e.message; }
+    let errToday = 0;
+    try {
+      const f = path.join(__dirname, '../../data/logs/app-' + new Date().toISOString().slice(0, 10) + '.log');
+      errToday = (fs.readFileSync(f, 'utf-8').match(/\[ERROR\]/g) || []).length;
+    } catch (e) {}
+    const up = Math.floor(process.uptime() / 60);
+    const lines = [
+      '🔧 システム自己点検',
+      `稼働時間: ${Math.floor(up / 60)}時間${up % 60}分 / 本日のエラーログ: ${errToday}件`,
+      `承認待ちカード: ${pendingApprovals.size}件(ボタン生存)`,
+      note,
+      '',
+      'これで直らない場合は下の再起動を試すか、大塚さんに連絡してください。',
+    ];
+    try {
+      await bot.sendMessage(msg.chat.id, lines.join('\n'), {
+        reply_markup: { inline_keyboard: [[{ text: '🔄 Botを再起動する(安全・約20秒)', callback_data: 'sys:restart' }]] },
+      });
+    } catch (e) {}
+  });
+
   bot.onText(/^\/(ヘルプ|help|使い方)(?:@\S+)?$/, async (msg) => {
     if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
     await bot.sendMessage(msg.chat.id, [
@@ -506,6 +534,10 @@ function setupCallbacks() {
       '　🧠 この修正を今後も反映する',
       'というボタンが付きます。',
       '押せばBotが覚えて以後ずっと反映されます。押さなければ今回だけ。',
+      '',
+      '【調子がおかしいと思ったら】',
+      '/システム … Botの自己点検。「返信カードが来ない」等の時にまず実行',
+      '(消えたカードの再発行・未応答の生成やり直しが自動で走ります)',
       '',
       '【当選者を登録する】',
       '当選者が決まったら、そのまま貼り付けてください。',
@@ -579,6 +611,16 @@ function setupCallbacks() {
           `インプ数や補足があれば、このメッセージに返信で教えてください\n(例: 4200 エロ強 顔出しあり シャドバンなし)\n\n不要ならスルーでOKです`);
         if (sent && sent.message_id) evalNoteWait.set(sent.message_id, Number(winnerId));
       } catch (e) {}
+      return;
+    }
+    if (action === 'sys') {
+      const sub = q.data.split(':')[1];
+      if (sub === 'restart') {
+        await bot.answerCallbackQuery(q.id, { text: '再起動します' });
+        try { await bot.sendMessage(q.message.chat.id, `🔄 ${who}さんの操作でBotを再起動します。約20秒後に自動で戻り、未処理のカードは再発行されます。`); } catch (e) {}
+        const { spawn } = require('child_process');
+        spawn('/bin/sh', ['-c', 'sleep 1; launchctl kickstart -k gui/501/com.user.line.bot'], { detached: true, stdio: 'ignore' }).unref();
+      }
       return;
     }
     if (action === 'k') {
