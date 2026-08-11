@@ -101,8 +101,9 @@ function buildSystem() {
 <<ACTION:reissue>> … 承認カードの再発行のみ
 <<ACTION:regen:ID下6桁>> … 特定のお客様への返信を作り直す(状態情報の顧客ID下6桁で特定できた場合のみ)
 <<ACTION:restart>> … LINE Botの再起動(確認ボタンが出て、人間がタップしたときだけ実行される)
+<<ACTION:t2:依頼内容の要約>> … コードの修正・機能追加・動作変更の依頼を受けたとき。この行を出すと隔離環境で修正案の作成が始まる(本番のコードには触れない)。適用は必ずオーナーの✅承認が必要。返答本文には「修正案を作成します。数分後にオーナーのDMへ承認依頼が届きます」という趣旨を書く
 
-【できないこと】コードの修正・設定変更・新機能の追加・LINEへの直接送信・顧客データの書き換え・ファイルの操作。これらを求められたら断り、「司令塔案件」として大塚さんのClaude(司令塔)に貼れる依頼文を整形して返す。
+【できないこと】LINEへの直接送信・顧客データやDB・.envの書き換え・npmパッケージの追加。コードの修正や機能追加は t2 アクションで「修正案の作成→オーナー承認→適用」の形なら可能。t2でも扱えない大きな設計変更は「司令塔案件」として大塚さんのClaude(司令塔)に貼れる依頼文を整形して返す。
 
 【鉄則】わからないことは正直に「わからない」と言う。憶測で断定しない。状態は下の【現在のシステム状態】の実データに基づいて答える。危険と感じたら何も実行せず人間に委ねる。
 
@@ -129,8 +130,13 @@ async function converse(chatId, name, text) {
   if (clean) await tgCall(TOKEN, 'sendMessage', { chat_id: chatId, text: clean });
 
   for (const a of actions.slice(0, 1)) {
-    const [verb, arg] = a.split(':').map((x) => x && x.trim());
+    const verb = a.split(':')[0].trim();
+    const arg = a.indexOf(':') >= 0 ? a.slice(a.indexOf(':') + 1).trim() : '';
     journal(`Sentinel実行: ${a}(依頼: ${name})`);
+    if (verb === 't2') {
+      startT2Draft(arg || text, chatId, name).catch((e) => log('t2 start error', e.message));
+      continue;
+    }
     if (verb === 'restart') {
       await tgCall(TOKEN, 'sendMessage', {
         chat_id: chatId,
@@ -154,9 +160,80 @@ async function converse(chatId, name, text) {
   }
 }
 
+// ── Tier 2: コード修正の起草→オーナー承認→適用 ─────────────
+// 起草は隔離worktreeで行い(t2_draft.js)、適用はオーナーの✅後に独立プロセス(t2_apply.sh)が行う。
+let t2Busy = false;
+async function startT2Draft(request, chatId, requester) {
+  if (t2Busy) {
+    await tgCall(TOKEN, 'sendMessage', { chat_id: chatId, text: '⏳ 別の修正案を作成中です。完了してからもう一度依頼してください。' });
+    return;
+  }
+  t2Busy = true;
+  journal(`Tier2起草開始: ${request}(依頼: ${requester})`);
+  const { execFile } = require('child_process');
+  execFile(process.execPath, [path.join(__dirname, 't2_draft.js'), request],
+    { cwd: path.join(__dirname, '..'), timeout: 15 * 60000, maxBuffer: 10 * 1024 * 1024 },
+    async (err, stdout) => {
+      t2Busy = false;
+      let res = null;
+      try {
+        const lines = String(stdout || '').trim().split('\n');
+        res = JSON.parse(lines[lines.length - 1]);
+      } catch (e) {}
+      if (!res) res = { ok: false, error: (err && err.message) || '起草プロセスの出力を解釈できませんでした' };
+      try {
+        if (!res.ok) {
+          journal(`Tier2起草失敗: ${res.error || ''}`);
+          await tgCall(TOKEN, 'sendMessage', { chat_id: chatId, text: `⚠️ 修正案を作成できませんでした: ${res.error || '不明'}${res.summary ? '\n\n' + res.summary : ''}` });
+          return;
+        }
+        journal(`Tier2起草完了: ${res.branch} files=${(res.files || []).join(',')}`);
+        await tgCall(TOKEN, 'sendMessage', {
+          chat_id: OWNER,
+          text: `🛠 Tier2適用の承認依頼\n\n依頼: ${request}\n依頼者: ${requester}\n変更ファイル:\n${(res.files || []).map((f) => '・' + f).join('\n')}\n\n要約:\n${res.summary || '(なし)'}`,
+          reply_markup: { inline_keyboard: [[
+            { text: '✅ 適用する', callback_data: `t2:apply:${res.branch}` },
+            { text: '❌ 破棄する', callback_data: `t2:discard:${res.branch}` },
+          ]] },
+        });
+        await new Promise((resolve) => {
+          execFile('/usr/bin/curl', ['-s', '-m', '60', '-F', `chat_id=${OWNER}`, '-F', `document=@${res.diffFile}`, '-F', 'caption=変更差分(patch)', `http://127.0.0.1:8081/bot${TOKEN}/sendDocument`], () => resolve());
+        });
+        if (String(chatId) !== String(OWNER)) {
+          await tgCall(TOKEN, 'sendMessage', { chat_id: chatId, text: '📨 修正案ができました。オーナーのDMに承認依頼を送りました。' });
+        }
+      } catch (e) { log('t2 packet error', e.message); }
+    });
+}
+
 async function handleUpdate(u) {
   if (u.callback_query) {
     const q = u.callback_query;
+    if (q.data && q.data.startsWith('t2:')) {
+      const parts = q.data.split(':');
+      const act = parts[1];
+      const branch = parts.slice(2).join(':');
+      if (String(q.from.id) !== String(OWNER)) {
+        await tgCall(TOKEN, 'answerCallbackQuery', { callback_query_id: q.id, text: 'オーナーのみ承認できます' });
+        return;
+      }
+      if (act === 'apply') {
+        await tgCall(TOKEN, 'answerCallbackQuery', { callback_query_id: q.id, text: '適用を開始します' });
+        await tgCall(TOKEN, 'sendMessage', { chat_id: OWNER, text: `🔧 適用を開始しました(${branch})。結果はこのDMに届きます。` });
+        journal(`Tier2適用承認: ${branch}`);
+        const { spawn } = require('child_process');
+        spawn('/bin/sh', [path.join(__dirname, 't2_apply.sh'), branch], { detached: true, stdio: 'ignore' }).unref();
+      } else if (act === 'discard') {
+        await tgCall(TOKEN, 'answerCallbackQuery', { callback_query_id: q.id, text: '破棄しました' });
+        journal(`Tier2破棄: ${branch}`);
+        try {
+          const { execSync } = require('child_process');
+          execSync(`git worktree remove --force /Users/akiramacmini/projects/t2work 2>/dev/null; git branch -D "${branch}" 2>/dev/null || true`, { cwd: path.join(__dirname, '..'), shell: '/bin/sh' });
+        } catch (e) {}
+        await tgCall(TOKEN, 'sendMessage', { chat_id: OWNER, text: `🗑 修正案(${branch})を破棄しました。` });
+      }
+      return;
+    }
     if (q.data === 'sn:restart') {
       if (!(await isAllowed(q.from.id))) { await tgCall(TOKEN, 'answerCallbackQuery', { callback_query_id: q.id, text: '権限がありません' }); return; }
       await tgCall(TOKEN, 'answerCallbackQuery', { callback_query_id: q.id, text: '再起動します' });
