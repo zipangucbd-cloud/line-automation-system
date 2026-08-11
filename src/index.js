@@ -52,6 +52,15 @@ async function main() {
     const ok = await approvalFlow.proposeFollowup({ userId, userName, text, label: label || 'フォローアップ' });
     res.json({ ok });
   });
+  // Sentinel(駐在エージェント)からの安全操作(localhost限定)
+  app.post('/internal/repair', express.json(), async (req, res) => {
+    const ip = req.socket.remoteAddress;
+    if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') return res.status(403).send('Forbidden');
+    const { action, tail } = req.body || {};
+    try { res.json(await approvalFlow.execRepair({ action, tail })); }
+    catch (e) { res.json({ ok: false, error: e.message }); }
+  });
+
   const port = process.env.PORT || 3000;
   app.listen(port, () => { logger.info(`Server on port ${port}`); logger.info('Ready'); });
   // 整合性チェック: 「あるべき状態」(pendingカードのボタン生存・受信への応答)と実際を

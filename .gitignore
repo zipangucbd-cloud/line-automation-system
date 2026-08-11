@@ -7,3 +7,7 @@ data/
 setup.sh
 data/backups/
 data/negative_reviewers.json
+data/sentinel_state.json
+data/sentinel_knowledge.md
+data/sentinel_learned.md
+data/ops_journal.md

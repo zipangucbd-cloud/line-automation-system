@@ -829,4 +829,27 @@ async function reconcile() {
   } catch (e) { logger.error('Reconcile(unanswered) failed:', e.message); }
 }
 
-module.exports = { setup, handleMessage, proposeFollowup, reissuePendingApprovals, reconcile };
+// Sentinel(駐在エージェント)からの安全操作要求を実行する(localhostの/internal/repair経由)
+async function execRepair({ action, tail }) {
+  if (action === 'check') { await reconcile(); return { ok: true, note: '整合性チェックを実行しました' }; }
+  if (action === 'reissue') { await reissuePendingApprovals(); return { ok: true, note: 'カード再発行チェックを実行しました' }; }
+  if (action === 'regen') {
+    if (!tail) return { ok: false, error: '対象IDがありません' };
+    const cands = (deps.listRecentCustomers ? deps.listRecentCustomers(14) : []).filter((c) => String(c.user_id).endsWith(String(tail)));
+    if (cands.length !== 1) return { ok: false, error: '対象顧客を特定できません(ID下6桁: ' + tail + ')' };
+    const t = cands[0];
+    const userName = t.display_name || 'お客様';
+    const last = deps.getLastIncoming ? deps.getLastIncoming(t.user_id) : null;
+    inbox.set(t.user_id, {
+      userName,
+      texts: [(last && last.content) || '(直前のメッセージはchat.line.bizを確認)'],
+      images: [],
+      firstAt: Date.now(),
+      timer: setTimeout(() => { flushInbox(t.user_id).catch((err) => logger.error('Flush error:', err.message)); }, 1500),
+    });
+    return { ok: true, note: userName + '様への返信を再生成中(まもなく承認カードが届きます)' };
+  }
+  return { ok: false, error: '不明なアクション: ' + action };
+}
+
+module.exports = { setup, handleMessage, proposeFollowup, reissuePendingApprovals, reconcile, execRepair };
