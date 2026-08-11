@@ -14,6 +14,7 @@ async function main() {
     saveConversation: dbModule.saveConversation,
     saveApproval: dbModule.saveApproval,
     updateApproval: dbModule.updateApproval,
+    listPendingApprovals: dbModule.listPendingApprovals,
     getCustomer: dbModule.getCustomer,
     upsertCustomer: dbModule.upsertCustomer,
     saveKnowledgeGap: dbModule.saveKnowledgeGap,
@@ -50,5 +51,7 @@ async function main() {
   });
   const port = process.env.PORT || 3000;
   app.listen(port, () => { logger.info(`Server on port ${port}`); logger.info('Ready'); });
+  // 再起動で承認ボタンが失われたpendingカードを自動再発行する(相手が返信待ちのまま止まる事故の防止)
+  setTimeout(() => approvalFlow.reissuePendingApprovals().catch((e) => logger.error('Reissue error:', e.message)), 5000);
 }
 main().catch(err => { logger.error('Fatal:', err.message); process.exit(1); });

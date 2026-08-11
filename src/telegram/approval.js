@@ -641,4 +641,34 @@ function setupCallbacks() {
     }
   });
 }
-module.exports = { setup, handleMessage, proposeFollowup };
+// Bot再起動で承認ボタンが失われた(メモリ喪失)pendingカードを、保存済みの返信案のまま自動で再発行する。
+// 相手はこちらの返信を待っている側なので、「次のメッセージが来たら置き換わる」だけでは対応が止まってしまう。
+async function reissuePendingApprovals() {
+  const bot = getBot();
+  if (!bot || !deps.listPendingApprovals) return;
+  let rows = [];
+  try { rows = deps.listPendingApprovals(3) || []; } catch (e) { logger.error('Reissue list failed:', e.message); return; }
+  let n = 0;
+  for (const r of rows) {
+    n++;
+    try {
+      deps.updateApproval({ approvalId: r.approval_id, status: 'superseded', finalReply: null });
+      const customer = deps.getCustomer(r.user_id);
+      const userName = (customer && customer.display_name) || 'お客様';
+      const history = (deps.getRecentConversations(r.user_id, 30) || []).reverse().map((c) => ({ role: c.direction === 'incoming' ? 'user' : 'assistant', content: c.content }));
+      const lastIncoming = [...history].reverse().find((m) => m.role === 'user');
+      const messageText = lastIncoming ? lastIncoming.content : '(受信内容はchat.line.bizで確認してください)';
+      let winnerInfo = null;
+      try { winnerInfo = buildWinnerContext({ deps, messageText, customer, userId: r.user_id }); } catch (e2) {}
+      const id = `${Date.now()}${n}`;
+      const p = { userId: r.user_id, userName, reply: r.generated_reply, stage: customer && customer.stage, eventNote: '\n♻️ Bot再起動のため再発行(返信案は元の生成のまま。受信画像があった場合はchat.line.bizで確認)', messageText, customerData: customer, history, winnerInfo, images: [], tgMsgId: null };
+      pendingApprovals.set(id, p);
+      deps.saveApproval({ approvalId: id, userId: r.user_id, generatedReply: r.generated_reply, status: 'pending' });
+      await sendApproval(id, p, false);
+      logger.info(`Reissued approval ${r.approval_id} -> #${id}`);
+    } catch (e) { logger.error(`Reissue failed (${r.approval_id}):`, e.message); }
+  }
+  if (n) logger.info(`Reissue done: ${n}件`);
+}
+
+module.exports = { setup, handleMessage, proposeFollowup, reissuePendingApprovals };
