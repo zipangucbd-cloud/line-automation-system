@@ -17,6 +17,7 @@ async function main() {
     listPendingApprovals: dbModule.listPendingApprovals,
     listUnansweredUsers: dbModule.listUnansweredUsers,
     getLastIncoming: dbModule.getLastIncoming,
+    listRecentCustomers: dbModule.listRecentCustomers,
     getCustomer: dbModule.getCustomer,
     upsertCustomer: dbModule.upsertCustomer,
     saveKnowledgeGap: dbModule.saveKnowledgeGap,

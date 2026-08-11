@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getBot } = require('./bot');
-const { generateReply, parseWinners, parseEvaluationNote } = require('../claude/client');
+const { generateReply, parseWinners, parseEvaluationNote, runRaw } = require('../claude/client');
 const { buildWinnerContext, offerStatusLine } = require('../utils/winner_match');
 const { negativeInfo } = require('../utils/negative_list');
 const config = require('../config');
@@ -490,6 +490,70 @@ function setupCallbacks() {
     await bot.sendMessage(msg.chat.id, n ? `✅ @${match[2].replace(/^@/, '')} を完了にしました(一覧から外れます)` : `⚠️ @${match[2].replace(/^@/, '')} は対応中の当選者に見つかりませんでした`);
   });
 
+  // 自然文での軽い修復指示: 「/直して ○○さんへの返信が来てない」等をClaudeが解釈して安全な操作に変換する。
+  // 実行できるのは実証済みの安全操作のみ(生成やり直し/カード再発行/点検/再起動の確認ボタン)。それ以外は司令塔行きと案内する
+  bot.onText(/^\/(直して|なおして|fix)(?:@\S+)?(?:\s|\n)([\s\S]+)$/, async (msg, match) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    const req = match[2].trim();
+    try { await bot.sendMessage(msg.chat.id, '🔧 内容を確認しています…'); } catch (e) {}
+    let intent = null;
+    try {
+      const cust = (deps.listRecentCustomers ? deps.listRecentCustomers(14) : [])
+        .map((c) => `${c.display_name || '(名前不明)'} | ${String(c.user_id).slice(-6)}`).join('\n');
+      const raw = await runRaw({
+        system: 'あなたはLINE Bot運用の修復依頼を解釈する分類器です。JSONのみを出力します。',
+        prompt: `スタッフの依頼文を読み、該当アクションをJSONで返してください。\n\nアクション:\n- regen: 特定のお客様への返信が生成されていない/届いていない → 作り直す。targetに名前の手がかり、下の顧客一覧に該当があればuser_id_tail(ID下6桁)も入れる\n- reissue: 承認カードが消えた/ボタンが押せない → 再発行\n- restart: Botの再起動を求めている\n- check: 全体の点検・状態確認\n- none: 上記以外(コード修正・新機能・複雑な調査など)\n\n【最近の顧客一覧(表示名 | ID下6桁)】\n${cust || '(なし)'}\n\n【依頼文】\n${req}\n\n出力例: {"action":"regen","target":"Hiroko","user_id_tail":"997f11"}\n該当顧客が特定できなければ user_id_tail は null。JSONのみ。`,
+        maxTokens: 300,
+        label: 'repairIntent',
+      });
+      const m = raw.match(/\{[\s\S]*\}/);
+      intent = m ? JSON.parse(m[0]) : null;
+    } catch (e) { logger.error('Repair intent parse failed:', e.message); }
+    if (!intent || !intent.action) {
+      try { await bot.sendMessage(msg.chat.id, '⚠️ 依頼を読み取れませんでした。念のため全体点検を実行します。'); } catch (e) {}
+      try { await reconcile(); } catch (e) {}
+      return;
+    }
+    if (intent.action === 'regen') {
+      let target = null;
+      if (intent.user_id_tail) {
+        const cands = (deps.listRecentCustomers ? deps.listRecentCustomers(14) : []).filter((c) => String(c.user_id).endsWith(String(intent.user_id_tail)));
+        if (cands.length === 1) target = cands[0];
+      }
+      if (!target) {
+        try { await bot.sendMessage(msg.chat.id, `⚠️ どのお客様か特定できませんでした${intent.target ? `(「${intent.target}」に該当なし)` : ''}。LINEの表示名を入れて「/直して ○○さんへの返信が来てない」の形でお願いします。`); } catch (e) {}
+        return;
+      }
+      const userName = target.display_name || 'お客様';
+      const last = deps.getLastIncoming ? deps.getLastIncoming(target.user_id) : null;
+      // 未処理カードが残っていても、追い越し統合が自動で1枚にまとめてくれる
+      inbox.set(target.user_id, {
+        userName,
+        texts: [(last && last.content) || '(直前のメッセージはchat.line.bizを確認)'],
+        images: [],
+        firstAt: Date.now(),
+        timer: setTimeout(() => { flushInbox(target.user_id).catch((err) => logger.error('Flush error:', err.message)); }, 1500),
+      });
+      try { await bot.sendMessage(msg.chat.id, `🔁 ${userName}様への返信を作り直しています。まもなく新しい承認カードが届きます。`); } catch (e) {}
+      return;
+    }
+    if (intent.action === 'reissue') {
+      try { await reissuePendingApprovals(); } catch (e) {}
+      try { await bot.sendMessage(msg.chat.id, '♻️ カードの再発行チェックを実行しました(該当があれば直前に届いています)。'); } catch (e) {}
+      return;
+    }
+    if (intent.action === 'restart') {
+      try { await bot.sendMessage(msg.chat.id, 'Botを再起動しますか?', { reply_markup: { inline_keyboard: [[{ text: '🔄 再起動する(安全・約20秒)', callback_data: 'sys:restart' }]] } }); } catch (e) {}
+      return;
+    }
+    if (intent.action === 'check') {
+      try { await reconcile(); } catch (e) {}
+      try { await bot.sendMessage(msg.chat.id, '✅ 全体点検を実行しました。状態の詳細は /システム で確認できます。'); } catch (e) {}
+      return;
+    }
+    try { await bot.sendMessage(msg.chat.id, `📋 これは現地の安全操作では対応できない内容です。大塚さんの司令塔(Claude)に次のように伝えてください:\n「${req}」`); } catch (e) {}
+  });
+
   // Botの自己点検: スタッフが「カードが来ない」等と感じた時にまず押す安全な復旧コマンド。
   // 整合性チェックを即時実行し(消えたカードの再発行・未応答の生成やり直し)、状態サマリと安全な再起動ボタンを返す
   bot.onText(/^\/(システム|system|点検)(?:@\S+)?$/, async (msg) => {
@@ -538,6 +602,8 @@ function setupCallbacks() {
       '【調子がおかしいと思ったら】',
       '/システム … Botの自己点検。「返信カードが来ない」等の時にまず実行',
       '(消えたカードの再発行・未応答の生成やり直しが自動で走ります)',
+      '/直して(困りごと) … 例: /直して Hirokoさんへの返信が来てない',
+      '(日本語を理解して、作り直し・再発行など安全な操作だけ自動でやります)',
       '',
       '【当選者を登録する】',
       '当選者が決まったら、そのまま貼り付けてください。',
