@@ -44,10 +44,43 @@ async function flushInbox(userId) {
   inbox.delete(userId);
   if (e.timer) clearTimeout(e.timer);
 
-  const { userName, texts, images } = e;
+  const { userName, texts } = e;
+  let images = e.images;
   const imgNote = images.length ? `[画像${images.length}枚を受信]` : '';
-  const messageText = [texts.join('\n'), imgNote].filter(Boolean).join('\n') || '[メッセージを受信]';
+  let messageText = [texts.join('\n'), imgNote].filter(Boolean).join('\n') || '[メッセージを受信]';
   logger.info(`Processing from ${userName}: text${texts.length}件 / image${images.length}枚`);
+
+  // 同じ相手の未処理カードが残っていたら無効化し、未返信分を全部まとめて1つの返信案に作り直す
+  // (時差で追加メッセージが届くと、旧カードと新カードから別々の返信が送られてしまう事故の防止)
+  try {
+    let old = null;
+    for (const [pid, pp] of pendingApprovals) {
+      if (pp.userId === userId) { old = { id: pid, p: pp }; break; }
+    }
+    if (old) {
+      pendingApprovals.delete(old.id);
+      if (old.p.tgMsgId) tgMsgToApproval.delete(old.p.tgMsgId);
+      try { deps.updateApproval({ approvalId: old.id, status: 'superseded', finalReply: null }); } catch (e2) {}
+      const bot = getBot();
+      if (bot && old.p.tgMsgId && config.telegram.approvalChatId) {
+        try {
+          await bot.editMessageText(
+            `⏩ ${userName}様から追加のメッセージが届いたため、このカードは無効になりました。\n直後に届く新しいカード1枚で、全メッセージ分をまとめて対応してください。`,
+            { chat_id: config.telegram.approvalChatId, message_id: old.p.tgMsgId });
+        } catch (e2) {}
+      }
+      // 旧カードが対象にしていた受信内容を引き継ぐ(フォローアップ提案カードは提案文のため引き継がない)
+      if (!String(old.id).startsWith('fu')) {
+        if (old.p.messageText && !messageText.includes(old.p.messageText)) {
+          messageText = `${old.p.messageText}\n${messageText}`;
+        }
+        if (old.p.images && old.p.images.length) {
+          images = [...old.p.images, ...images].slice(0, 5);
+        }
+      }
+      logger.info(`Superseded pending approval #${old.id} for ${userName}`);
+    }
+  } catch (err) { logger.error('Supersede failed:', err.message); }
 
   const customer = deps.getCustomer(userId);
   let winnerInfo = null;
@@ -211,7 +244,7 @@ async function sendApproval(id, p, isRevision) {
       for (let i = 0; i < p.images.length; i++) {
         try {
           await bot.sendPhoto(config.telegram.approvalChatId, Buffer.from(p.images[i].base64, 'base64'), {
-            caption: `📎 受信画像 ${i + 1}/${p.images.length}(#${id} の判断材料)`,
+            caption: `📎 ${p.userName}様からの受信画像 ${i + 1}/${p.images.length}(#${id} の判断材料)`,
             ...(sent && sent.message_id ? { reply_to_message_id: sent.message_id } : {}),
           }, { filename: `image_${i + 1}.jpg`, contentType: p.images[i].mediaType || 'image/jpeg' });
         } catch (e) { logger.error('カードへの画像添付に失敗:', e.message); }
