@@ -46,6 +46,19 @@ function offerStatusLine(w) {
     const next = /cream|クリーム/i.test(w.chosen_product) ? 'ORIGINAL(グミ)' : 'CREAM(クリーム)';
     s += ` / この商品のレビュー完了後に${next}を案内する(同時案内・同時購入は絶対禁止)`;
   }
+  // 進行プラン(送料負担=Shopify / Amazonキャッシュバック)。plan列が空なら注文番号の形式から推定する
+  let plan = w.plan;
+  if (!plan && w.order_number) {
+    if (/^#/.test(w.order_number)) plan = 'shipping';
+    else if (/^\d{3}-\d{7}-\d{7}$/.test(w.order_number)) plan = 'amazon';
+  }
+  if (plan === 'shipping') {
+    s += `\n💳 進行プラン: 送料負担(Shopify${w.order_number ? ' 注文' + w.order_number : ''}) — 発送は自動検知され、追跡番号入りの発送報告カードが自動で立ちます`;
+  } else if (plan === 'amazon') {
+    s += `\n💳 進行プラン: Amazonキャッシュバック${w.order_number ? '(注文' + w.order_number + ')' : ''} — 発送・配達通知はAmazonが行うため、こちらからの追跡番号連絡は不要です`;
+  } else {
+    s += `\n💳 進行プラン: 未確定(まだプラン選択前か、記録漏れ)`;
+  }
   return s;
 }
 
