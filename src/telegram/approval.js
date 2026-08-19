@@ -300,7 +300,7 @@ async function sendApproval(id, p, isRevision) {
   try { const w = deps.findWinnerByLineUser(p.userId); if (w) provLine = `\n📦 ${offerStatusLine(w)}`; } catch (e) {}
   // 承認カードには顧客に送信される文章そのまま(マーカー除去後)を表示し、マーカー情報は警告部分に集約する
   const cleanReply = sanitizeForCustomer(p.reply);
-  const text = `${head}${provLine}${alert}${p.eventNote || ''}\n\n👤 ${cardName(p.userId, p.userName)}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 送信される返信文(この文だけがお客様に届きます)：\n${cleanReply}${learnNote}${p.internalNote ? `\n\n🗒 Botメモ — 承認者向け(送信されません)：\n${String(p.internalNote).slice(0, 500)}` : ''}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
+  const text = `${head}${provLine}${alert}${p.eventNote || ''}\n\n👤 ${cardName(p.userId, p.userName)}様：\n${trunc}\n\n📝 お客様に送信される文(⬇️の線に挟まれた部分だけ)：\n━━━━━━━━━━\n${cleanReply}\n━━━━━━━━━━\n⬆️ ここまでが送信されます。ここから下は社内向け(送信されません)${learnNote}${p.internalNote ? `\n\n🗒 Botメモ：\n${String(p.internalNote).slice(0, 500)}` : ''}\n\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
   const rows = [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]];
   if (isRevision && fb) rows.push([{ text: '🧠 この修正を今後も反映する', callback_data: `k:${id}` }]);
   const opts = { reply_markup: { inline_keyboard: rows } };
