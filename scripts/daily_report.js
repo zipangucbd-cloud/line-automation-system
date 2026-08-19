@@ -88,6 +88,15 @@ try {
   if (apiRoute) alerts.push(`従量課金ルート(route=api)の使用: ${apiRoute}件 — Max枠が詰まった可能性`);
   else if (maxFail) alerts.push(`Maxルート失敗(APIで復旧済み含む): ${maxFail}件`);
   if (poll > 60) alerts.push(`Telegramポーリングエラー多発: ${poll}件(直近ログ)`);
+  // Shopify巡回のヘルス(15分毎にログが動いているか)
+  try {
+    const st = fs.statSync('/tmp/line_shopifysync.log');
+    const ageMin = Math.floor((Date.now() - st.mtimeMs) / 60000);
+    const stxt = fs.readFileSync('/tmp/line_shopifysync.log', 'utf-8');
+    const sfails = (stxt.match(/token grant failed|shopify_sync error/g) || []).length;
+    if (ageMin > 120) alerts.push(`Shopify巡回が${Math.floor(ageMin / 60)}時間動いていません(launchd停止の可能性。/直して で相談を)`);
+    if (sfails) alerts.push(`Shopify巡回のエラー: ${sfails}件(/tmp/line_shopifysync.log)`);
+  } catch (e) { alerts.push('Shopify巡回のログが見つかりません(再起動直後でなければ未稼働の可能性)'); }
   const reissued = cnt(/Reissued approval/g);
   const regen = cnt(/未応答を検出/g);
   if (reissued || regen) alerts.push(`自動修復の実績: カード再発行${reissued}件 / 生成やり直し${regen}件(整合性チェックが正常に働いた記録)`);

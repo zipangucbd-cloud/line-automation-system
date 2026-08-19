@@ -81,6 +81,10 @@ function statusSnapshot() {
     if (errs.length) out.push('直近のエラー:\n' + errs.slice(-4).join('\n'));
   } catch (e) { out.push('(本日のログファイルなし)'); }
   try {
+    const sl = fs.readFileSync('/tmp/line_shopifysync.log', 'utf-8').trim().split('\n').filter((l) => /orders in|done\.|error|failed/.test(l));
+    out.push('Shopify巡回(直近): ' + sl.slice(-2).join(' / ').slice(0, 180));
+  } catch (e) { out.push('Shopify巡回: ログなし(停止または再起動直後)'); }
+  try {
     const j = fs.readFileSync(JOURNAL, 'utf-8').trim().split('\n');
     out.push('運用日誌(直近):\n' + j.slice(-10).join('\n'));
   } catch (e) {}
