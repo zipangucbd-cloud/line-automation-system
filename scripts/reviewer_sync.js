@@ -114,12 +114,13 @@ function serialToISO(v) {
 
 // ---- 集約 ----
 const POS = new Set(['良い', '非常に良い', 'ポジより']);
-const EVALS = new Set(['良い', '非常に良い', 'ポジより', '良くない']);
+const EVALS = new Set(['良い', '非常に良い', 'ポジより', '良くない', '#無し投稿']);
 const GENRES = new Set(['エロ強', 'エロ弱', '一般人', 'インフルエンサー']);
 const SPEEDS = new Set(['2週間', '1か月', '2か月', '3か月以上']);
 const BURIS = new Set(['〇', '✖', '凍結', '投稿削除', '？']);
 const cell = (r, i) => ((i != null && r[i] != null ? r[i] : '') + '').trim();
 const validId = (x) => /^[a-z0-9_]{1,15}$/.test(x);
+const looksLikeOrderNo = (x) => /^\d{3}-\d{7}-\d{7}$/.test(x) || /^\d{6,}$/.test(String(x).replace(/-/g, ''));
 function products(note) {
   const out = new Set(); const n = (note || '').toLowerCase();
   if (/cream|クリーム/.test(n)) out.add('CREAM');
@@ -191,7 +192,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
     const p = get(xid);
     p.fromKaisu = true;
     if (!p.name) p.name = cell(r, 2);
-    if (!p.fullname) p.fullname = cell(r, 4).split(/[\/,]/)[0];
+    if (!p.fullname) { const fn = cell(r, 4).split(/[\/,]/)[0]; if (fn && !looksLikeOrderNo(fn)) p.fullname = fn; }
     const ch = cell(r, 0);
     if (ch === '公') p.channel = '公式LINE'; else if (ch.toUpperCase() === 'X') p.channel = 'X DM';
     for (let bi = 0; bi < RB.length; bi++) {
@@ -240,7 +241,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       if (!validId(xid)) continue;
       const p = get(xid);
       if (!p.name) p.name = cell(r, b.name);
-      if (!p.fullname) p.fullname = cell(r, b.fullname).split(/[\/,]/)[0];
+      if (!p.fullname) { const fn = cell(r, b.fullname).split(/[\/,]/)[0]; if (fn && !looksLikeOrderNo(fn)) p.fullname = fn; }
       const g = cell(r, b.genre); if (GENRES.has(g)) p.genre = g;
       const note = cell(r, b.note);
       if (note) chFromNote(p, note);
@@ -249,6 +250,15 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       const bu = cell(r, b.buri); if (BURIS.has(bu) && !p.buri) p.buri = bu;
       const sa = cell(r, b.sai); if (sa === '済') p.sai = '済'; else if (sa === '未' && p.sai !== '済') p.sai = '未';
       if (bu === '✖' || bu === '投稿削除') { p.caution = true; p.cautionWhy.push('ブリ' + bu); }
+      if (p.fromKaisu) {
+        let evG = cell(r, b.ev);
+        if (evG && !EVALS.has(evG)) { classify(p, evG); evG = ''; }
+        if (evG && !POS.has(evG)) {
+          p.evals.push(evG);
+          const dStrG = iso ? ` ${iso.slice(0, 10).replace(/-/g, '/')}` : '';
+          p.history.push(`台帳:(${evG})${dStrG}`);
+        }
+      }
       if (!p.fromKaisu) {
         // ギフ回数シートに載っていない = 一度もレビュー投稿していない人(大塚さん確認済みのシート定義)
         const shipped = cell(r, b.ship) === '済' || !!cell(r, b.shipdate);
