@@ -40,7 +40,8 @@ function initDb() {
   const wcols = db.prepare('PRAGMA table_info(winners)').all().map(c => c.name);
   // 後半5列は投稿を見た人間の判断。スプレッドシートで蓄積してきた分析資産をBot側でも引き継ぐため。
   const addCols = [['shipped_at', 'DATETIME'], ['arrived_at', 'DATETIME'], ['review_due', 'DATE'], ['reviewed_at', 'DATETIME'], ['last_followup_at', 'DATETIME'],
-    ['eval', 'TEXT'], ['impressions', 'TEXT'], ['genre', 'TEXT'], ['face', 'TEXT'], ['shadowban', 'TEXT'], ['followers', 'TEXT'], ['eval_note', 'TEXT']];
+    ['eval', 'TEXT'], ['impressions', 'TEXT'], ['genre', 'TEXT'], ['face', 'TEXT'], ['shadowban', 'TEXT'], ['followers', 'TEXT'], ['eval_note', 'TEXT'],
+    ['order_number', 'TEXT'], ['order_date', 'DATETIME'], ['tracking_number', 'TEXT'], ['carrier', 'TEXT'], ['full_name', 'TEXT']];
   for (const [name, type] of addCols) {
     if (!wcols.includes(name)) db.exec(`ALTER TABLE winners ADD COLUMN ${name} ${type}`);
   }
