@@ -130,11 +130,12 @@ async function flushInbox(userId) {
     if (r && r.applied.includes('レビュー完了')) askEvaluation(userId, r.xId).catch((e) => logger.error('Ask eval failed:', e.message));
   } catch (err) { logger.error('Event apply failed:', err.message); }
   const id = Date.now().toString();
-  const p = { userId, userName, reply, stage, eventNote, messageText, customerData: customer, history, winnerInfo, images, tgMsgId: null };
+  const p = { userId, userName, reply, stage, eventNote, messageText, customerData: customer, history, winnerInfo, images, tgMsgId: null, lastMsgAt: (e.times && e.times.length ? Math.max(...e.times) : e.firstAt) };
   pendingApprovals.set(id, p);
   deps.saveApproval({ approvalId: id, userId, generatedReply: reply, status: 'pending' });
   recordGaps({ userId, reply, approvalId: id });
   await sendApproval(id, p, false);
+  await supersedeOlderCards(id, p);
 }
 
 // 「覚えて」「覚えて:」「/覚えて」+ 改行やスペース区切りのいずれでも知識追加として受け付ける
@@ -340,7 +341,7 @@ async function handleRevisionRequest(msg) {
   try { deps.applyWinnerEvents && deps.applyWinnerEvents({ lineUserId: p.userId, events: newEvents }); } catch (e) {}
   // 「今後もこうする」の提案に使うため、修正指示を新しい承認IDに引き継ぐ
   if (!learnMatch) lastFeedback.set(newId, feedback.replace(/\n+/g, ' ').trim().slice(0, 200));
-  const np = { userId: p.userId, userName: p.userName, reply: newReply, stage: newStage, messageText: p.messageText, customerData: p.customerData, history: p.history, winnerInfo: p.winnerInfo, images: p.images, tgMsgId: null };
+  const np = { userId: p.userId, userName: p.userName, reply: newReply, stage: newStage, messageText: p.messageText, customerData: p.customerData, history: p.history, winnerInfo: p.winnerInfo, images: p.images, tgMsgId: null, lastMsgAt: p.lastMsgAt, kind: p.kind };
   pendingApprovals.set(newId, np);
   deps.saveApproval({ approvalId: newId, userId: p.userId, generatedReply: newReply, status: 'pending' });
   await sendApproval(newId, np, true);
@@ -349,7 +350,7 @@ async function handleRevisionRequest(msg) {
 let fuCounter = 0;
 async function proposeFollowup({ userId, userName, text, label }) {
   const id = `fu${Date.now()}${fuCounter++}`;
-  const p = { userId, userName: userName || '(不明)', reply: text, messageText: `(フォローアップ提案: ${label})`, customerData: null, history: [], winnerInfo: null, tgMsgId: null };
+  const p = { userId, userName: userName || '(不明)', reply: text, messageText: `(フォローアップ提案: ${label})`, customerData: null, history: [], winnerInfo: null, tgMsgId: null, kind: 'followup' };
   pendingApprovals.set(id, p);
   deps.saveApproval({ approvalId: id, userId, generatedReply: text, status: 'pending' });
   const bot = getBot();
@@ -766,6 +767,27 @@ function setupCallbacks() {
     }
   });
 }
+// 同一ユーザーのpendingカードを1枚に保つ。カード作成「後」に呼ぶことで、
+// 生成中(20〜40秒)に次のメッセージが届いて両方のカードが生き残るレースを塞ぐ。
+// メッセージ受信時刻(lastMsgAt)が新しい方を残す。フォローアップ提案カードは対象外。
+async function supersedeOlderCards(newId, np) {
+  const bot = getBot();
+  for (const [oid, op] of [...pendingApprovals.entries()]) {
+    if (oid === newId || op.userId !== np.userId || op.kind === 'followup' || np.kind === 'followup') continue;
+    const keepNew = (np.lastMsgAt || 0) >= (op.lastMsgAt || 0);
+    const dropId = keepNew ? oid : newId;
+    const dropP = keepNew ? op : np;
+    const keepId = keepNew ? newId : oid;
+    pendingApprovals.delete(dropId);
+    try { deps.updateApproval({ approvalId: dropId, status: 'superseded', finalReply: null }); } catch (e) {}
+    if (bot && dropP.tgMsgId) {
+      try { await bot.editMessageText(`⏩ このカードは新しいカード(#${keepId})に統合されました。新しい方で対応してください。`, { chat_id: config.telegram.approvalChatId, message_id: dropP.tgMsgId }); } catch (e) {}
+    }
+    logger.info(`Card merged: #${dropId} -> #${keepId}`);
+    if (!keepNew) return; // 自分の方が古かった(自分を破棄した)
+  }
+}
+
 // Bot再起動で承認ボタンが失われた(メモリ喪失)pendingカードを、保存済みの返信案のまま自動で再発行する。
 // 相手はこちらの返信を待っている側なので、「次のメッセージが来たら置き換わる」だけでは対応が止まってしまう。
 async function reissuePendingApprovals() {
@@ -796,7 +818,9 @@ async function reissuePendingApprovals() {
       const p = { userId: r.user_id, userName, reply: r.generated_reply, stage: customer && customer.stage, eventNote: '\n♻️ Bot再起動のため再発行(返信案は元の生成のまま。受信画像があった場合はchat.line.bizで確認)', messageText, customerData: customer, history, winnerInfo, images: [], tgMsgId: null };
       pendingApprovals.set(id, p);
       deps.saveApproval({ approvalId: id, userId: r.user_id, generatedReply: r.generated_reply, status: 'pending' });
+      p.lastMsgAt = new Date(String(r.created_at).replace(' ', 'T') + 'Z').getTime();
       await sendApproval(id, p, false);
+      await supersedeOlderCards(id, p);
       logger.info(`Reissued approval ${r.approval_id} -> #${id}`);
     } catch (e) { logger.error(`Reissue failed (${r.approval_id}):`, e.message); }
   }
