@@ -134,6 +134,16 @@ function applyWinnerEvents({ lineUserId, events }) {
     db.prepare('UPDATE winners SET review_due = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(events.review_due, w.id);
     applied.push(`レビュー予定日=${events.review_due}`);
   }
+  if (typeof events.order === 'string' && events.order.trim()) {
+    const on = events.order.trim().slice(0, 30);
+    // 使い回し検知: 同じ注文番号が別の当選者で既に使われていないか(キャッシュバック不正の典型)
+    const dup = db.prepare('SELECT x_id, campaign FROM winners WHERE order_number = ? AND id != ?').get(on, w.id);
+    if (!w.order_number) {
+      db.prepare('UPDATE winners SET order_number = ?, order_date = COALESCE(order_date, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(on, w.id);
+      applied.push(`注文番号=${on}`);
+    }
+    if (dup) applied.push(`🚨 注文番号の使い回し疑い! ${on} は @${dup.x_id}(${dup.campaign})が既に使用済みです。承認前に確認してください`);
+  }
   if (typeof events.product === 'string' && ['gummy', 'cream'].includes(events.product) && !w.chosen_product) {
     db.prepare('UPDATE winners SET chosen_product = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(events.product, w.id);
     applied.push(`選択商品=${events.product}`);
