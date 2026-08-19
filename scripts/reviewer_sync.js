@@ -296,6 +296,8 @@ async function fetchRetry(url, opts = {}, tries = 4) {
         if (/凍結/.test(note)) { p.caution = true; p.cautionWhy.push('凍結'); }
         // 発送済み × レビュー実績なし × 提供から60日超(レビュー期限2ヶ月を過ぎている) → 要注意
         if (shipped && iso && now - new Date(iso + 'T00:00:00+09:00').getTime() > 60 * 86400000) p.shippedLongAgo = true;
+        // 発送済みなのに日付が未記入の行 → 期限判定ができないため、レビュー実績が無ければ同様に要注意へ
+        if (shipped && !iso) p.shippedNoDate = true;
       }
     }
   }
@@ -308,7 +310,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
     // 転記漏れ疑い = ギフ回数に不在だが、ギフティング側でレビュー済かつ評価がポジティブ
     p.transferMiss = !p.fromKaisu && !!p.posInGift;
     // 要注意 = 提供済みなのにレビュー記録が一切なく、提供から60日(レビュー期限2ヶ月)を過ぎている
-    if (!p.fromKaisu && !p.reviewedInGift && p.shippedLongAgo) { p.caution = true; p.cautionWhy.unshift('レビュー実績なし(提供済)'); }
+    if (!p.fromKaisu && !p.reviewedInGift && (p.shippedLongAgo || p.shippedNoDate)) { p.caution = true; p.cautionWhy.unshift(p.shippedLongAgo ? 'レビュー実績なし(提供済)' : 'レビュー実績なし(提供済・日付不明)'); }
     // 評価未記入でギフ回数にも不在 = 品質不明。将来の掘り起こし予備軍として印を残す
     if (!p.fromKaisu && p.evalBlank && !p.posInGift) p.cautionWhy.push(p.postTrace ? '評価未記入(投稿痕跡あり)' : '評価未記入');
   }
@@ -369,7 +371,9 @@ async function fetchRetry(url, opts = {}, tries = 4) {
   const txtAlways = (v) => ({ rich_text: v ? [{ text: { content: String(v).slice(0, 1900) } }] : [] });
   let created = 0, updated = 0, failed = 0;
   for (const [xid, p] of people) {
-    const pos = p.evals.filter((e) => POS.has(e)).length;
+    let pos = p.evals.filter((e) => POS.has(e)).length;
+    // ギフ回数シートは「ポジ投稿した人だけ」が載る運用のため、在籍していれば評価セル未記入でもポジ1回以上とみなす
+    if (p.fromKaisu && pos === 0) pos = 1;
     const neg = p.evals.length - pos;
     const props = {
       'X ID': { title: [{ text: { content: '@' + xid } }] },
