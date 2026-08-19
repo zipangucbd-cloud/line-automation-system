@@ -200,9 +200,27 @@ async function askEvaluation(lineUserId, xId) {
 }
 
 // 社内向けの目印。顧客に送る文面には絶対に含めてはならない。
-const MARKER_RE = /[[［]\s*(要人間判断|知識不足|要確認)\s*[:：]?[^\]］]*[\]］]\s*/g;
+const MARKER_RE = /[[［]\s*(要人間判断|要判断|知識不足|要確認|リスク該当)\s*[:：]?[^\]］]*[\]］]\s*/g;
+// マーカーの重要度レベル定義
+const MARKER_LEVELS = {
+  '要人間判断': { emoji: '🚨', level: 'critical', label: '要人間判断' },
+  '要判断': { emoji: '🚨', level: 'critical', label: '要判断' },
+  'リスク該当': { emoji: '⚠️', level: 'warning', label: 'リスク該当' },
+  '知識不足': { emoji: '⚠️', level: 'warning', label: '知識不足' },
+  '要確認': { emoji: '💡', level: 'info', label: '要確認' },
+};
 function extractMarkers(text) {
-  return [...String(text).matchAll(MARKER_RE)].map((m) => m[0].replace(/^\s*[[［]|[\]］]\s*$/g, '').trim());
+  const matches = [...String(text).matchAll(MARKER_RE)];
+  return matches.map((m) => {
+    const full = m[0];
+    const inner = full.replace(/^\s*[[［]|[\]］]\s*$/g, '').trim();
+    // マーカー種別を判定
+    let type = '要確認';
+    for (const key of Object.keys(MARKER_LEVELS)) {
+      if (inner.includes(key)) { type = key; break; }
+    }
+    return { type, text: inner, full };
+  });
 }
 // 送信直前に必ず通す。マーカーを取り除き、先頭に残った空行も整える。
 function sanitizeForCustomer(text) {
@@ -236,9 +254,42 @@ async function sendApproval(id, p, isRevision) {
   const trunc = p.messageText.length > 500 ? p.messageText.substring(0, 500) + '...' : p.messageText;
   const head = (isRevision ? `🔄 修正版 承認依頼 #${id}` : `🤖 承認依頼 #${id}`) + (p.stage ? `  [${p.stage}]` : '');
   const markers = extractMarkers(p.reply);
-  const alert = markers.length
-    ? `\n\n🚨 Botが判断できていません — 内容を確認してください:\n${markers.map((g) => `・${g}`).join('\n')}\n(✏️返信で情報を伝えると作り直します。この目印は送信時に自動で取り除かれます)`
-    : '';
+
+  // マーカーをDBに記録
+  if (markers.length && deps.saveInternalMarker) {
+    for (const m of markers) {
+      try {
+        deps.saveInternalMarker({
+          approvalId: id,
+          userId: p.userId,
+          markerType: m.type,
+          markerText: m.text,
+          generatedReply: p.reply.substring(0, 1000), // 全文は長すぎるので冒頭のみ
+        });
+      } catch (e) { logger.error('Marker record failed:', e.message); }
+    }
+  }
+
+  // マーカーの重要度別に警告を構成
+  let alert = '';
+  if (markers.length) {
+    const critical = markers.filter((m) => MARKER_LEVELS[m.type]?.level === 'critical');
+    const warning = markers.filter((m) => MARKER_LEVELS[m.type]?.level === 'warning');
+    const info = markers.filter((m) => MARKER_LEVELS[m.type]?.level === 'info');
+
+    alert = '\n\n';
+    if (critical.length) {
+      alert += `🚨🚨🚨 このまま送信しないでください 🚨🚨🚨\n`;
+      alert += `Botが判断できていません:\n${critical.map((m) => `${MARKER_LEVELS[m.type].emoji} ${m.text}`).join('\n')}\n`;
+    }
+    if (warning.length) {
+      alert += (critical.length ? '\n' : '') + `⚠️ 警告 — 内容を確認してください:\n${warning.map((m) => `${MARKER_LEVELS[m.type].emoji} ${m.text}`).join('\n')}\n`;
+    }
+    if (info.length) {
+      alert += (critical.length || warning.length ? '\n' : '') + `💡 確認事項:\n${info.map((m) => `${MARKER_LEVELS[m.type].emoji} ${m.text}`).join('\n')}\n`;
+    }
+    alert += `\n✏️ 返信で情報を伝えると作り直します\n💡 この目印は送信時に自動で取り除かれます`;
+  }
   // 修正で作り直した場合は、その指示を今後も反映するか(=永続知識にするか)をこの場で選べるようにする
   const fb = lastFeedback.get(id);
   const learnNote = isRevision && fb
@@ -741,7 +792,12 @@ function setupCallbacks() {
       // 送信前に消し込む: ボタンの二度押し・コールバック二重配送による二重送信を防ぐ(失敗時は戻す)
       pendingApprovals.delete(id);
       const ok = await deps.sendLineReply(p.userId, outgoing);
-      if (ok) { deps.saveConversation({ userId: p.userId, direction: 'outgoing', content: outgoing }); deps.updateApproval({ approvalId: id, status: 'approved', finalReply: outgoing }); }
+      if (ok) {
+        deps.saveConversation({ userId: p.userId, direction: 'outgoing', content: outgoing });
+        deps.updateApproval({ approvalId: id, status: 'approved', finalReply: outgoing });
+        // マーカーのステータスを更新
+        try { if (deps.updateMarkerStatus) deps.updateMarkerStatus({ approvalId: id, status: 'approved' }); } catch (e) {}
+      }
       else { pendingApprovals.set(id, p); }
       await bot.answerCallbackQuery(q.id, { text: ok ? '✅ 送信完了' : '❌ 送信失敗(もう一度押してください)' });
       if (ok) { try { await bot.editMessageText(`✅ 承認・送信済 (${who})\n\n${q.message.text}`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {} }
@@ -749,6 +805,8 @@ function setupCallbacks() {
       if (ok && p.tgMsgId) tgMsgToApproval.delete(p.tgMsgId);
     } else if (action === 'r') {
       deps.updateApproval({ approvalId: id, status: 'rejected', finalReply: null });
+      // マーカーのステータスを更新
+      try { if (deps.updateMarkerStatus) deps.updateMarkerStatus({ approvalId: id, status: 'rejected' }); } catch (e) {}
       await bot.answerCallbackQuery(q.id, { text: '❌ 却下' });
       try { await bot.editMessageText(`❌ 却下 (${who})\n\n${q.message.text}`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {}
       // 却下は「Botの案が使えなかった」という最も重要な学習信号。理由を拾う

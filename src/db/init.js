@@ -35,6 +35,9 @@ function initDb() {
     CREATE INDEX IF NOT EXISTS idx_winners_xid ON winners(x_id);
     CREATE INDEX IF NOT EXISTS idx_winners_line ON winners(line_user_id);
     CREATE TABLE IF NOT EXISTS knowledge_gaps (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, gap TEXT, approval_id TEXT, resolved INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS internal_markers (id INTEGER PRIMARY KEY AUTOINCREMENT, approval_id TEXT NOT NULL, user_id TEXT, marker_type TEXT NOT NULL, marker_text TEXT, generated_reply TEXT, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+    CREATE INDEX IF NOT EXISTS idx_markers_approval ON internal_markers(approval_id);
+    CREATE INDEX IF NOT EXISTS idx_markers_type ON internal_markers(marker_type, created_at);
   `);
   // 既存DBへのカラム追加マイグレーション
   const wcols = db.prepare('PRAGMA table_info(winners)').all().map(c => c.name);
@@ -198,4 +201,25 @@ function listPendingApprovals(days = 3) {
   return db.prepare(`SELECT approval_id, user_id, generated_reply, created_at, tg_msg_id FROM approvals WHERE status = 'pending' AND created_at >= datetime('now', ?)`).all(`-${days} days`);
 }
 
-module.exports = { listPendingApprovals, listUnansweredUsers, listRecentCustomers, saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+// 内部マーカー記録: 返信案に含まれた内部マーカーを記録する
+function saveInternalMarker({ approvalId, userId, markerType, markerText, generatedReply }) {
+  db.prepare('INSERT INTO internal_markers (approval_id, user_id, marker_type, marker_text, generated_reply) VALUES (?, ?, ?, ?, ?)').run(approvalId, userId, markerType, markerText, generatedReply);
+}
+
+// 承認/却下時にマーカーのステータスを更新する
+function updateMarkerStatus({ approvalId, status }) {
+  db.prepare('UPDATE internal_markers SET status = ? WHERE approval_id = ?').run(status, approvalId);
+}
+
+// 統計・分析用: マーカー種別ごとの集計
+function getMarkerStats(days = 30) {
+  return db.prepare(`
+    SELECT marker_type, status, COUNT(*) as count
+    FROM internal_markers
+    WHERE created_at >= datetime('now', ?)
+    GROUP BY marker_type, status
+    ORDER BY marker_type, status
+  `).all(`-${days} days`);
+}
+
+module.exports = { saveInternalMarker, updateMarkerStatus, getMarkerStats, listPendingApprovals, listUnansweredUsers, listRecentCustomers, saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
