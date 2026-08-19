@@ -48,9 +48,19 @@ function buildSystemPrompt() {
 const STAGE_INSTRUCTION = `
 
 ---
-【出力形式の指示】
-返信文の最後に、改行してから次の1行を必ず付けてください(この行は顧客には送信されず、社内の進捗管理にのみ使われます):
+【出力形式の指示 — 必ずこの構造で出力すること】
+
+(承認者に伝えたいことがあれば、まずここに書く: 画像の分析結果、判断の理由、迷った点など。
+ この部分はお客様には送信されず、承認カードに「Botメモ」として表示される。無ければ省略してよい)
+<<REPLY>>
+お客様に送信する本文だけをここに書く
+<<END>>
 <<STAGE:ステージID>>
+
+【絶対規則】
+- <<REPLY>>〜<<END>>の中には、お客様への本文以外を一切入れない(分析・説明・社内向けの文章は必ずブロックの外)
+- 本文の中で「運営指示」「学習済みの知識」「[日付]の指示に従い」など社内情報への言及は絶対に禁止
+- <<STAGE:ステージID>>の行は<<END>>の後に付ける(顧客には送信されない)
 
 ステージIDは次から選びます:
 S1_問診回答待ち / S1_問診不足追撃 / S2_本人確認待ち / S3_事前確認待ち / S4_オファー提示済 / S4_Amazon資格確認 / S4_LP案内済 / S4_カートスクショ待ち / S5_注文番号待ち / S5_発送済 / S6_到着連絡待ち / S6_撮影説明済 / S6_読了確認待ち / S7_レビュー下書き待ち / S7_下書き確認済 / S8_EC投稿待ち / S8_完了報告待ち / S9_キャッシュバック済 / S9_連鎖案内済 / 完了 / 対応保留
@@ -197,8 +207,17 @@ async function generateReply({ userName, messageText, conversationHistory = [], 
       events[key] = value || true;
     }
     // 社内向けの制御行は顧客に送る本文から必ず取り除く
-    const reply = raw.replace(/<<(?:STAGE|EVENT):[^>]*>>/g, '').replace(/\n{3,}/g, '\n\n').trim();
-    return { reply, stage, events };
+    // <<REPLY>>ブロック内だけを顧客向け本文とする。ブロック外は承認者向けメモ(送信されない)。
+    // これにより、モデルが分析や説明を先に書いても顧客に漏れない(2026-08-19の送信事故対策)
+    const rm = raw.match(/<<REPLY>>([\s\S]*?)<<END>>/);
+    let body = raw;
+    let internalNote = null;
+    if (rm) {
+      body = rm[1];
+      internalNote = raw.replace(rm[0], '').replace(/<<(?:STAGE|EVENT):[^>]*>>/g, '').replace(/\n{3,}/g, '\n\n').trim() || null;
+    }
+    const reply = body.replace(/<<(?:STAGE|EVENT):[^>]*>>/g, '').replace(/<<(?:REPLY|END)>>/g, '').replace(/\n{3,}/g, '\n\n').trim();
+    return { reply, stage, events, internalNote };
   } catch (err) {
     logger.error('Claude API error:', err.message);
     throw err;
