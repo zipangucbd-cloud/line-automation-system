@@ -168,7 +168,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
   const now = Date.now();
   const people = new Map();
   const get = (xid) => {
-    if (!people.has(xid)) people.set(xid, { name: '', fullname: '', note: '', channel: '', evals: [], history: [], blockDates: [], giftDates: [], given: 0, reviewed: 0, fol: '', sb: '', face: '', speed: '', tokki: '', genre: '', buri: '', sai: '', caution: false, cautionWhy: [], fromKaisu: false, reviewedInGift: false, posInGift: false, evalBlank: false, postTrace: false, shippedLongAgo: false, prods: new Set() });
+    if (!people.has(xid)) people.set(xid, { name: '', fullname: '', note: '', channel: '', evals: [], history: [], blockDates: [], giftDates: [], given: 0, reviewed: 0, fol: '', sb: '', face: '', speed: '', tokki: '', genre: '', buri: '', sai: '', caution: false, cautionWhy: [], fromKaisu: false, reviewedInGift: false, posInGift: false, evalBlank: false, postTrace: false, shippedLongAgo: false, prods: new Set(), rounds: [] });
     return people.get(xid);
   };
   const chFromNote = (p, note) => {
@@ -215,6 +215,9 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       if (shipped || ev) {
         const dStr = iso ? ` ${iso.slice(0, 10).replace(/-/g, '/')}` : '';
         p.history.push(`${bi + 1}回目:${prods.join('+') || '?'}${ev ? '(' + ev + ')' : reviewDone ? '(済)' : shipped ? '(レビュー未)' : ''}${dStr}`);
+      }
+      if (shipped || ev) {
+        p.rounds.push({ key: `k${bi + 1}`, n: bi + 1, prods: prods.length ? prods : ['不明'], date: p.blockDates[bi] || null, review: reviewDone, ev: ev || null, src: 'ギフ回数' });
       }
       prods.forEach((x) => p.prods.add(x));
       if (note) { p.note = note; chFromNote(p, note); }
@@ -284,6 +287,10 @@ async function fetchRetry(url, opts = {}, tries = 4) {
           if (!ev) { p.evalBlank = true; if (cell(r, b.imp) || cell(r, b.speed)) p.postTrace = true; }
         }
         if (ev) p.evals.push(ev);
+        if (shipped || ev) {
+          const rp = products(note);
+          p.rounds.push({ key: `g${rn}_${b.id}`, n: 0, prods: rp.length ? rp : ['不明'], date: iso || null, review: cell(r, b.review) === '済', ev: ev || null, src: '台帳' });
+        }
         products(note).forEach((x) => p.prods.add(x));
         if (note && !p.note) p.note = note;
         if (/凍結/.test(note)) { p.caution = true; p.cautionWhy.push('凍結'); }
@@ -395,9 +402,65 @@ async function fetchRetry(url, opts = {}, tries = 4) {
     for (const [k, v] of Object.entries(opt)) if (v) props[k] = v;
     try {
       if (existing.has(xid)) { await api(`/pages/${existing.get(xid)}`, { method: 'PATCH', body: JSON.stringify({ properties: props }) }); updated++; }
-      else { await api('/pages', { method: 'POST', body: JSON.stringify({ parent: { database_id: DB_ID }, properties: props }) }); created++; }
+      else { const cRes = await api('/pages', { method: 'POST', body: JSON.stringify({ parent: { database_id: DB_ID }, properties: props }) }); if (cRes && cRes.id) existing.set(xid, cRes.id); created++; }
     } catch (e) { failed++; if (failed <= 5) console.error(`fail @${xid}:`, e.message); }
     await sleep(310);
   }
+  // ===== 提供履歴(1行=1回の提供)の同期 =====
+  // ギフ回数の横伸びブロックと台帳の発送行を縦に展開し、実績マスターとリレーションで繋ぐ。
+  // ローカルキャッシュ(内容ハッシュ)で変更行だけを書き、週次の負荷を抑える。
+  {
+    const fsP = require('fs');
+    const pathP = require('path');
+    const PROV_DB_ID = process.env.NOTION_PROVISIONS_DB_ID || '2ad2daf8c94243909b12c3317c3f4038';
+    const cacheFile = pathP.join(__dirname, '../data/prov_synced.json');
+    let cache = {};
+    try { cache = JSON.parse(fsP.readFileSync(cacheFile, 'utf-8')); } catch (e) {}
+    let provDbEmpty = false;
+    try {
+      const q0 = await api(`/databases/${PROV_DB_ID}/query`, { method: 'POST', body: JSON.stringify({ page_size: 1 }) });
+      provDbEmpty = !(q0.results || []).length;
+    } catch (e) {}
+    let pCreated = 0; let pUpdated = 0; let pSkipped = 0; let pFailed = 0;
+    for (const [xid, p] of people) {
+      const pageId = existing.get(xid);
+      if (!pageId || !p.rounds.length) continue;
+      const kaisuMax = Math.max(0, ...p.rounds.filter((r) => r.src === 'ギフ回数').map((r) => r.n));
+      let gi = 0;
+      for (const r of p.rounds.slice().sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')))) {
+        if (!r.n) r.n = kaisuMax + (++gi);
+      }
+      for (const r of p.rounds) {
+        const skey = `${xid}#${r.key}`;
+        const hash = [r.n, (r.prods || []).join('+'), r.date || '', r.review ? '済' : '未', r.ev || ''].join('|');
+        if (cache[skey] === hash) { pSkipped++; continue; }
+        const props = {
+          '提供': { title: [{ text: { content: `@${xid} ${r.n}回目` } }] },
+          'レビュアー': { relation: [{ id: pageId }] },
+          '商品': { multi_select: (r.prods || ['不明']).map((name) => ({ name })) },
+          '回数': { number: r.n },
+          'レビュー': { select: { name: r.review ? '済' : '未' } },
+          '出典': { select: { name: r.src } },
+          'SyncKey': { rich_text: [{ text: { content: skey } }] },
+        };
+        if (r.date) props['提供日'] = { date: { start: String(r.date).slice(0, 10) } };
+        if (r.ev) props['評価'] = { select: { name: r.ev } };
+        try {
+          let pgId = cache['id:' + skey];
+          if (!pgId && !provDbEmpty) {
+            const q = await api(`/databases/${PROV_DB_ID}/query`, { method: 'POST', body: JSON.stringify({ page_size: 1, filter: { property: 'SyncKey', rich_text: { equals: skey } } }) });
+            pgId = q.results && q.results[0] && q.results[0].id;
+          }
+          if (pgId) { await api(`/pages/${pgId}`, { method: 'PATCH', body: JSON.stringify({ properties: props }) }); pUpdated++; }
+          else { const cr = await api('/pages', { method: 'POST', body: JSON.stringify({ parent: { database_id: PROV_DB_ID }, properties: props }) }); pgId = cr && cr.id; pCreated++; }
+          cache[skey] = hash;
+          if (pgId) cache['id:' + skey] = pgId;
+        } catch (e) { pFailed++; if (pFailed <= 5) console.error('prov upsert failed:', skey, e.message); }
+      }
+    }
+    fsP.writeFileSync(cacheFile, JSON.stringify(cache));
+    console.log(`provision rows: created=${pCreated}, updated=${pUpdated}, skipped=${pSkipped}, failed=${pFailed}`);
+  }
+
   console.log(`${new Date().toISOString()} reviewer sync done: ${people.size} people, created=${created}, updated=${updated}, failed=${failed}`);
 })().catch((e) => { console.error('reviewer sync failed:', e.message); process.exit(1); });
