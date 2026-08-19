@@ -223,6 +223,10 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       if (b.tokki) { const t = cell(r, b.tokki); if (t && !GENRES.has(t)) p.tokki = t; else if (GENRES.has(t)) p.genre = t; }
       const imp = cell(r, b.imp);
       if (/凍結/.test(imp) || /凍結/.test(note)) { p.caution = true; p.cautionWhy.push('凍結'); }
+      // インプ欄に数値以外が書かれている場合はスタッフの注記(例:「#無し投稿」)として特記へ回収する
+      else if (imp && !/^[\d,.\s]+([万kK千件回])?$/.test(imp) && !p.tokki.includes(imp)) {
+        p.tokki = p.tokki ? p.tokki + ' / ' + imp : imp;
+      }
       if (/BAD|破棄/i.test(note)) { p.caution = true; p.cautionWhy.push(note.slice(0, 12)); }
       if (shipped && !reviewDone && iso && now - new Date(iso + 'T00:00:00+09:00').getTime() > 60 * 86400000) { p.caution = true; p.cautionWhy.push(`${bi + 1}回目レビュー未のまま60日+`); }
     }
@@ -250,6 +254,10 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       const bu = cell(r, b.buri); if (BURIS.has(bu) && !p.buri) p.buri = bu;
       const sa = cell(r, b.sai); if (sa === '済') p.sai = '済'; else if (sa === '未' && p.sai !== '済') p.sai = '未';
       if (bu === '✖' || bu === '投稿削除') { p.caution = true; p.cautionWhy.push('ブリ' + bu); }
+      const impG = cell(r, b.imp);
+      if (impG && !/^[\d,.\s]+([万kK千件回])?$/.test(impG) && !/凍結/.test(impG) && !p.tokki.includes(impG)) {
+        p.tokki = p.tokki ? p.tokki + ' / ' + impG : impG;
+      }
       if (p.fromKaisu) {
         let evG = cell(r, b.ev);
         if (evG && !EVALS.has(evG)) { classify(p, evG); evG = ''; }
@@ -348,6 +356,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
 
   const sel = (v) => (v ? { select: { name: v } } : undefined);
   const txt = (v) => (v ? { rich_text: [{ text: { content: String(v).slice(0, 1900) } }] } : undefined);
+  const txtAlways = (v) => ({ rich_text: v ? [{ text: { content: String(v).slice(0, 1900) } }] : [] });
   let created = 0, updated = 0, failed = 0;
   for (const [xid, p] of people) {
     const pos = p.evals.filter((e) => POS.has(e)).length;
@@ -375,7 +384,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
     const tokki = [p.tokki, ...new Set(p.cautionWhy)].filter(Boolean).join(' / ');
     const opt = {
       'アカウント名': txt(p.name), '評価履歴': txt(p.history.join(' → ') || p.evals.join('→')),
-      '氏名': txt(p.fullname), '備考': txt(p.note), '特記': txt(tokki),
+      '氏名': txt(p.fullname), '備考': txt(p.note), '特記': txtAlways(tokki),
       'チャネル': sel(p.channel), 'フォロワー帯': sel(/以下|以上|万垢/.test(p.fol) ? p.fol : ''),
       'シャドバン': sel(p.sb), '顔出し': sel(p.face), 'ジャンル': sel(p.genre),
       '再提供': sel(p.sai), '投稿スピード': sel(p.speed),
