@@ -25,10 +25,10 @@ async function handleMessage({ userId, userName, messageText, image = null }) {
   deps.saveConversation({ userId, direction: 'incoming', content: messageText });
   deps.upsertCustomer({ userId, displayName: userName });
 
-  const e = inbox.get(userId) || { userName, texts: [], images: [], firstAt: Date.now(), timer: null };
+  const e = inbox.get(userId) || { userName, texts: [], times: [], images: [], firstAt: Date.now(), timer: null };
   e.userName = userName;
   if (image) { if (e.images.length < MAX_IMAGES) e.images.push(image); }
-  else if (messageText) e.texts.push(messageText);
+  else if (messageText) { e.texts.push(messageText); (e.times = e.times || []).push(Date.now()); }
 
   if (e.timer) clearTimeout(e.timer);
   const remain = MAX_WAIT_MS - (Date.now() - e.firstAt);
@@ -47,7 +47,11 @@ async function flushInbox(userId) {
   const { userName, texts } = e;
   let images = e.images;
   const imgNote = images.length ? `[画像${images.length}枚を受信]` : '';
-  let messageText = [texts.join('\n'), imgNote].filter(Boolean).join('\n') || '[メッセージを受信]';
+  // 各メッセージに受信時刻を付ける(承認カードで「いつ届いたか」が分かるように。
+  // 追い越し統合で古い未返信分と新着が混ざるときに特に重要)
+  const fmtTime = (ms) => { const d = new Date(ms); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+  const stamped = texts.map((t, i) => `[${fmtTime((e.times || [])[i] || Date.now())}] ${t}`);
+  let messageText = [stamped.join('\n'), imgNote ? `[${fmtTime(Date.now())}] ${imgNote}` : ''].filter(Boolean).join('\n') || '[メッセージを受信]';
   logger.info(`Processing from ${userName}: text${texts.length}件 / image${images.length}枚`);
 
   // 同じ相手の未処理カードが残っていたら無効化し、未返信分を全部まとめて1つの返信案に作り直す
@@ -242,7 +246,9 @@ async function sendApproval(id, p, isRevision) {
   // 何の当選者/再提供で、今どの商品を提供中か(セットなら次)を常時表示する
   let provLine = '';
   try { const w = deps.findWinnerByLineUser(p.userId); if (w) provLine = `\n📦 ${offerStatusLine(w)}`; } catch (e) {}
-  const text = `${head}${provLine}${alert}${p.eventNote || ''}\n\n👤 ${cardName(p.userId, p.userName)}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${p.reply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
+  // 承認カードには顧客に送信される文章そのまま(マーカー除去後)を表示し、マーカー情報は警告部分に集約する
+  const cleanReply = sanitizeForCustomer(p.reply);
+  const text = `${head}${provLine}${alert}${p.eventNote || ''}\n\n👤 ${cardName(p.userId, p.userName)}様：\n${trunc}\n\n━━━━━━━━━━\n\n📝 AI返答：\n${cleanReply}${learnNote}\n\n━━━━━━━━━━\n✏️ さらに修正：このメッセージに「返信」で指示を送ると再生成します`;
   const rows = [[{ text: '✅ 承認', callback_data: `a:${id}` }, { text: '❌ 却下', callback_data: `r:${id}` }]];
   if (isRevision && fb) rows.push([{ text: '🧠 この修正を今後も反映する', callback_data: `k:${id}` }]);
   const opts = { reply_markup: { inline_keyboard: rows } };

@@ -310,6 +310,15 @@ async function fetchRetry(url, opts = {}, tries = 4) {
     fs.writeFileSync(path.join(__dirname, '../data/negative_reviewers.json'),
       JSON.stringify({ updatedAt: new Date().toISOString(), count: Object.keys(negatives).length, negatives }, null, 1));
     console.log(`negative reviewers: ${Object.keys(negatives).length} -> data/negative_reviewers.json`);
+    // スプシ台帳ベースの提供履歴マップ(当選者登録時の「被り選出」警告用)
+    const provisions = {};
+    for (const [xid, p] of people) {
+      const dates = [...p.blockDates.filter(Boolean), ...p.giftDates].sort();
+      if (p.given > 0 || dates.length) provisions[xid] = { name: p.name || '', count: p.given, last: dates[dates.length - 1] || null };
+    }
+    fs.writeFileSync(path.join(__dirname, '../data/sheet_provisions.json'),
+      JSON.stringify({ updatedAt: new Date().toISOString(), count: Object.keys(provisions).length, people: provisions }));
+    console.log(`provisions map: ${Object.keys(provisions).length} -> data/sheet_provisions.json`);
     if (process.argv.includes('--negatives-only')) { console.log('negatives-only: Notion同期はスキップ'); process.exit(0); }
   }
 

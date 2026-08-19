@@ -18,9 +18,16 @@ const dup = db.prepare("SELECT id, campaign, status FROM winners WHERE lower(x_i
 if (dup) console.log(`⚠️ 既存のアクティブな登録あり: #${dup.id} (${dup.campaign} / ${dup.status}) — 重ねて登録します`);
 const r = db.prepare('INSERT INTO winners (x_id, campaign, offer, tier, notes) VALUES (?, ?, ?, ?, ?)').run(xId, campaign, offer, tier, notes);
 console.log(`✅ 登録完了 #${r.lastInsertRowid}: @${xId} | ${campaign} | ${offer} | ${tier}${notes ? ' | ' + notes : ''}`);
-const { negativeInfo } = require('../src/utils/negative_list');
+const { negativeInfo, provisionInfo } = require('../src/utils/negative_list');
 const neg = negativeInfo(xId);
 if (neg) {
   console.log(`🚨 警告: @${xId}${neg.name ? '(' + neg.name + ')' : ''} は過去に「良くない」評価が${neg.negCount}回あります。選出ミスでないか確認してください。`);
   console.log(`   履歴: ${neg.history.join(' → ')}`);
+}
+const prov = provisionInfo(xId);
+if (prov && prov.last) {
+  const days = Math.floor((Date.now() - new Date(prov.last + 'T00:00:00+09:00').getTime()) / 86400000);
+  if (days <= 60) {
+    console.log(`⚠️ 被り疑い: スプシ台帳で最終提供 ${prov.last}(${days}日前 / 通算${prov.count}回)${prov.name ? ' — ' + prov.name : ''}。重複選出でないか確認してください。`);
+  }
 }

@@ -14,4 +14,16 @@ function negativeInfo(xId) {
   }
 }
 
-module.exports = { negativeInfo };
+const PROV_FILE = path.join(__dirname, '../../data/sheet_provisions.json');
+
+// スプシ台帳(ギフティング/ギフ回数)ベースの提供履歴。被り選出の検知に使う
+function provisionInfo(xId) {
+  try {
+    const { people } = JSON.parse(fs.readFileSync(PROV_FILE, 'utf-8'));
+    return people[String(xId || '').replace(/^@/, '').trim().toLowerCase()] || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+module.exports = { negativeInfo, provisionInfo };
