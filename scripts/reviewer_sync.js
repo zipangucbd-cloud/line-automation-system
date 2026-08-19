@@ -179,11 +179,11 @@ async function fetchRetry(url, opts = {}, tries = 4) {
 
   // ===== ギフ回数(主) =====
   const RB = [
-    { note: 5, order: 9, track: 10, ship: 12, shipdate: 13, review: 15, speed: 16, imp: 17, a: 18, b: 19, face: 20, ev: 21, tokki: 22 },
-    { note: 23, order: 28, track: 29, ship: 31, shipdate: 32, review: 34, speed: 35, imp: 36, a: 37, b: 38, face: 39, ev: 40 },
-    { note: 43, order: 48, track: 49, ship: 51, shipdate: 52, review: 54, speed: 55, imp: 56, a: 57, b: 58, face: 59, ev: 60 },
-    { note: 62, order: 67, track: 68, ship: 70, shipdate: 71, review: 73, speed: 74, imp: 75, a: 76, b: 77, face: 78, ev: 79 },
-    { note: 81, order: 86, track: 87, ship: 89, shipdate: 90, review: 92, speed: 93, imp: 94, a: 95, b: 96, face: 97, ev: 98 },
+    { note: 5, order: 9, track: 10, ship: 12, shipdate: 13, arrive: 14, review: 15, speed: 16, imp: 17, a: 18, b: 19, face: 20, ev: 21, tokki: 22 },
+    { note: 23, order: 28, track: 29, ship: 31, shipdate: 32, arrive: 33, review: 34, speed: 35, imp: 36, a: 37, b: 38, face: 39, ev: 40 },
+    { note: 43, order: 48, track: 49, ship: 51, shipdate: 52, arrive: 53, review: 54, speed: 55, imp: 56, a: 57, b: 58, face: 59, ev: 60 },
+    { note: 62, order: 67, track: 68, ship: 70, shipdate: 71, arrive: 72, review: 73, speed: 74, imp: 75, a: 76, b: 77, face: 78, ev: 79 },
+    { note: 81, order: 86, track: 87, ship: 89, shipdate: 90, arrive: 91, review: 92, speed: 93, imp: 94, a: 95, b: 96, face: 97, ev: 98 },
   ];
   for (let i = 1; i < K.length; i++) {
     const r = K[i];
@@ -209,6 +209,8 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       const iso = serialToISO(cell(r, b.shipdate));
       // 初回=1回目の発送日、最終=一番右の回の発送日。回次(ブロック順)で保持する(時系列順ではない)
       if (iso) p.blockDates[bi] = iso;
+      // 発送日セルが未記入の回は、到着日を提供日の代替として使う(記入漏れ行の救済)
+      else { const isoA = serialToISO(cell(r, b.arrive)); if (isoA) p.blockDates[bi] = isoA; }
       const prods = products(note);
       if (shipped || ev) {
         const dStr = iso ? ` ${iso.slice(0, 10).replace(/-/g, '/')}` : '';
@@ -234,8 +236,8 @@ async function fetchRetry(url, opts = {}, tries = 4) {
 
   // ===== ギフティング(補完) =====
   const GB = [
-    { id: 2, name: 1, fullname: 3, note: 4, ship: 11, shipdate: 12, review: 15, ev: 22, buri: 18, sai: 19, genre: 21, imp: 17, speed: 16 },
-    { id: 26, name: 25, fullname: 27, note: 28, ship: 35, shipdate: 36, review: 39, ev: 46, buri: 42, sai: 43, genre: 45, imp: 41, speed: 40 },
+    { id: 2, name: 1, fullname: 3, note: 4, ship: 11, shipdate: 12, arrive: 14, review: 15, ev: 22, buri: 18, sai: 19, genre: 21, imp: 17, speed: 16 },
+    { id: 26, name: 25, fullname: 27, note: 28, ship: 35, shipdate: 36, arrive: 38, review: 39, ev: 46, buri: 42, sai: 43, genre: 45, imp: 41, speed: 40 },
     { id: 50, name: 49, fullname: 51, note: 52, ship: 58, shipdate: 59, review: 61, ev: 68, buri: 64, sai: 65, genre: 67, imp: 63, speed: 62 },
   ];
   for (let i = 2; i < G.length; i++) {
@@ -249,7 +251,8 @@ async function fetchRetry(url, opts = {}, tries = 4) {
       const g = cell(r, b.genre); if (GENRES.has(g)) p.genre = g;
       const note = cell(r, b.note);
       if (note) chFromNote(p, note);
-      const iso = serialToISO(cell(r, b.shipdate));
+      let iso = serialToISO(cell(r, b.shipdate));
+      if (!iso && b.arrive) iso = serialToISO(cell(r, b.arrive)); // 発送日未記入なら到着日で代替
       if (iso) p.giftDates.push(iso);
       const bu = cell(r, b.buri); if (BURIS.has(bu) && !p.buri) p.buri = bu;
       const sa = cell(r, b.sai); if (sa === '済') p.sai = '済'; else if (sa === '未' && p.sai !== '済') p.sai = '未';
