@@ -289,7 +289,7 @@ async function fetchRetry(url, opts = {}, tries = 4) {
         if (ev) p.evals.push(ev);
         if (shipped || ev) {
           const rp = products(note);
-          p.rounds.push({ key: `g${rn}_${b.id}`, n: 0, prods: rp.length ? rp : ['不明'], date: iso || null, review: cell(r, b.review) === '済', ev: ev || null, src: '台帳' });
+          p.rounds.push({ key: `g${i}_${b.id}`, n: 0, prods: rp.length ? rp : ['不明'], date: iso || null, review: cell(r, b.review) === '済', ev: ev || null, src: '台帳' });
         }
         products(note).forEach((x) => p.prods.add(x));
         if (note && !p.note) p.note = note;
