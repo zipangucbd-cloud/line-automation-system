@@ -885,12 +885,62 @@ async function reissuePendingApprovals() {
   if (n) logger.info(`Reissue done: ${n}件`);
 }
 
+// ── Telegram受信(ポーリング)の死活監視 ──────────────────────
+// 2026-09-15の障害: 毎日01:10に出る502バーストに429(レート制限)が重なり、
+// node-telegram-bot-apiのポーリングループが停止したまま自力復帰しなかった。
+// 送信は都度のリクエストなので生きたままなので「カードは届くのにボタンだけ効かない」
+// という気づきにくい壊れ方になる(実際にスタッフの承認が9時間止まった)。
+// 判定方法: 自分でgetUpdatesを叩き、409(=別クライアント=Bot自身がポーリング中)が
+// 返らなければ受信が止まっていると見なす。外部から観測するので内部状態に依存しない。
+let pollDeadStreak = 0;
+async function checkTelegramPolling() {
+  const token = config.telegram.botToken;
+  const base = process.env.TG_API_BASE || 'http://127.0.0.1:8081';
+  if (!token) return;
+  // true=生存 / false=停止 / null=判定不能
+  const probe = async () => {
+    try {
+      const r = await fetch(`${base}/bot${token}/getUpdates?limit=1&timeout=0`, { signal: AbortSignal.timeout(15000) }).then((x) => x.json());
+      if (r && r.ok === false && r.error_code === 409) return true;
+      if (r && r.ok === true) return false;
+      return null;
+    } catch (e) { return null; } // 通信自体が不調なときは誤検知を避けて判定しない
+  };
+  let alive = await probe();
+  // 正常時でもポーリングの切れ目(次のgetUpdatesを出すまでの一瞬)に当たると409が返らない。
+  // 誤って受信を落とさないよう、停止と見えたときだけ間を置いて再確認する
+  if (alive === false) { await new Promise((r) => setTimeout(r, 2500)); alive = await probe(); }
+  if (alive === null) return;
+  if (alive) { pollDeadStreak = 0; return; }
+  pollDeadStreak++;
+  logger.error(`Telegram受信が停止している可能性 (${pollDeadStreak}回連続)`);
+  if (pollDeadStreak < 2) return; // 一時的なゆらぎでは動かさない(5分×2=10分で復旧)
+  const bot = getBot();
+  if (!bot) return;
+  if (pollDeadStreak >= 4) {
+    logger.error('ポーリング再起動でも復旧しないため、プロセスごと再起動します');
+    try { await bot.sendMessage(config.telegram.approvalChatId, '⚠️ Telegramの受信が復旧しないため、Botを再起動します(約20秒後に承認カードが再発行されます)'); } catch (e) {}
+    const { spawn } = require('child_process');
+    spawn('/bin/sh', ['-c', 'sleep 1; launchctl kickstart -k gui/501/com.user.line.bot'], { detached: true, stdio: 'ignore' }).unref();
+    return;
+  }
+  try {
+    await bot.stopPolling({ cancel: true });
+    await new Promise((r) => setTimeout(r, 2000));
+    await bot.startPolling({ restart: true });
+    pollDeadStreak = 0;
+    logger.info('Telegramのポーリングを再起動しました');
+    try { await bot.sendMessage(config.telegram.approvalChatId, '🔄 承認ボタンの受信が止まっていたため自動で復旧しました。効かなかったカードは、そのまま押していただけます。'); } catch (e) {}
+  } catch (e) { logger.error('ポーリング再起動に失敗:', e.message); }
+}
+
 // ── 整合性チェック(5分ごと) ─────────────────────────────
 // 「仕組みが動いたはず」を信用せず、あるべき状態と実際を照合して自動修復する。
 // 1) DB上pendingなのにボタンが生きていないカード → 再発行
 // 2) 受信から20分〜3時間、返信もカードも無い相手 → 会話履歴から生成をやり直す(最大2回、以後は🚨警告)
 const regenAttempts = new Map(); // userId -> 試行回数
 async function reconcile() {
+  try { await checkTelegramPolling(); } catch (e) { logger.error('Reconcile(polling) failed:', e.message); }
   try { await reissuePendingApprovals(); } catch (e) { logger.error('Reconcile(reissue) failed:', e.message); }
   try {
     if (!deps.listUnansweredUsers) return;
@@ -951,4 +1001,134 @@ async function execRepair({ action, tail }) {
   return { ok: false, error: '不明なアクション: ' + action };
 }
 
-module.exports = { setup, handleMessage, proposeFollowup, reissuePendingApprovals, reconcile, execRepair };
+// ── Web承認画面(LINE風UI)向けAPI ─────────────────────────────
+// スタッフが公式LINEを開かずに「前後の文脈の確認 → 承認 → 送信結果の確認」まで
+// 1画面で完結できるようにする。Telegram側と同じpendingApprovalsを共有するため、
+// どちらで処理しても状態は常に一致する。
+const ui = {
+  // 対応待ちを上に、最近動いた人を下に並べた一覧
+  inbox() {
+    const rows = (deps.listRecentCustomers ? deps.listRecentCustomers(30) : []) || [];
+    const pendingByUser = new Map();
+    for (const [id, p] of pendingApprovals.entries()) {
+      const cur = pendingByUser.get(p.userId);
+      if (!cur || String(id) > String(cur.id)) pendingByUser.set(p.userId, { id, p });
+    }
+    const out = [];
+    for (const c of rows) {
+      const last = deps.getRecentConversations(c.user_id, 1)[0];
+      const pend = pendingByUser.get(c.user_id);
+      out.push({
+        userId: c.user_id,
+        name: cardName(c.user_id, c.display_name || 'お客様'),
+        stage: c.stage || '',
+        lastText: last ? String(last.content).replace(/\s+/g, ' ').slice(0, 40) : '',
+        lastAt: last ? last.timestamp : '',
+        lastDir: last ? last.direction : '',
+        pending: !!pend,
+        kind: pend && pend.p.kind === 'followup' ? 'followup' : '',
+      });
+      pendingByUser.delete(c.user_id);
+    }
+    // 会話履歴に出てこないフォローアップ提案なども取りこぼさない
+    for (const [userId, pend] of pendingByUser.entries()) {
+      const c = deps.getCustomer(userId) || {};
+      out.push({ userId, name: cardName(userId, c.display_name || pend.p.userName || 'お客様'), stage: c.stage || '', lastText: '(フォローアップ提案)', lastAt: '', lastDir: '', pending: true, kind: 'followup' });
+    }
+    out.sort((a, b) => (b.pending - a.pending) || String(b.lastAt || '').localeCompare(String(a.lastAt || '')));
+    return out;
+  },
+
+  // 1人分の会話全体+送信待ちの返信案
+  thread(userId) {
+    const c = deps.getCustomer(userId) || {};
+    const msgs = (deps.getRecentConversations(userId, 60) || []).slice().reverse()
+      .map((m) => ({ dir: m.direction, text: m.content, at: m.timestamp }));
+    let pending = null;
+    for (const [id, p] of pendingApprovals.entries()) {
+      if (p.userId !== userId) continue;
+      if (!pending || String(id) > String(pending.id)) {
+        pending = { id, reply: sanitizeForCustomer(p.reply), internalNote: p.internalNote || '', kind: p.kind || '', eventNote: p.eventNote || '' };
+      }
+    }
+    let prov = '';
+    try {
+      const w = deps.findWinnerByLineUser && deps.findWinnerByLineUser(userId);
+      if (w) prov = offerStatusLine(w);
+    } catch (e) {}
+    return { userId, name: cardName(userId, c.display_name || 'お客様'), stage: c.stage || '', prov, msgs, pending };
+  },
+
+  // 承認して送信(Telegram側のカードも「送信済み」に書き換えて二重送信を防ぐ)
+  async approve(id, who) {
+    const p = pendingApprovals.get(id);
+    if (!p) return { ok: false, error: 'この返信案は既に処理済みです(画面を更新してください)' };
+    const outgoing = sanitizeForCustomer(p.reply);
+    if (!outgoing) return { ok: false, error: '送信できる本文がありません' };
+    pendingApprovals.delete(id); // 送信前に消し込む(二重送信の防止)
+    const ok = await deps.sendLineReply(p.userId, outgoing);
+    if (!ok) { pendingApprovals.set(id, p); return { ok: false, error: 'LINEへの送信に失敗しました。もう一度お試しください' }; }
+    deps.saveConversation({ userId: p.userId, direction: 'outgoing', content: outgoing });
+    deps.updateApproval({ approvalId: id, status: 'approved', finalReply: outgoing });
+    try { if (deps.updateMarkerStatus) deps.updateMarkerStatus({ approvalId: id, status: 'approved' }); } catch (e) {}
+    const bot = getBot();
+    if (bot && p.tgMsgId) {
+      try { await bot.editMessageText(`✅ 承認・送信済 (${who} / 承認画面から)`, { chat_id: config.telegram.approvalChatId, message_id: p.tgMsgId }); } catch (e) {}
+      tgMsgToApproval.delete(p.tgMsgId);
+    }
+    logger.info(`UI approve #${id} by ${who}`);
+    return { ok: true };
+  },
+
+  async reject(id, who, reason) {
+    const p = pendingApprovals.get(id);
+    if (!p) return { ok: false, error: 'この返信案は既に処理済みです(画面を更新してください)' };
+    deps.updateApproval({ approvalId: id, status: 'rejected', finalReply: null });
+    try { if (deps.updateMarkerStatus) deps.updateMarkerStatus({ approvalId: id, status: 'rejected' }); } catch (e) {}
+    pendingApprovals.delete(id);
+    if (reason && reason.trim() && deps.saveKnowledgeGap) {
+      try { deps.saveKnowledgeGap({ userId: p.userId, gap: `却下理由(${who}): ${reason.trim().slice(0, 300)}` }); } catch (e) {}
+    }
+    const bot = getBot();
+    if (bot && p.tgMsgId) {
+      try { await bot.editMessageText(`❌ 却下 (${who} / 承認画面から)${reason ? `\n理由: ${reason.slice(0, 200)}` : ''}`, { chat_id: config.telegram.approvalChatId, message_id: p.tgMsgId }); } catch (e) {}
+      tgMsgToApproval.delete(p.tgMsgId);
+    }
+    logger.info(`UI reject #${id} by ${who}`);
+    return { ok: true };
+  },
+
+  // 修正指示 → 作り直し(Telegram側にも新しいカードが立つので運用は変わらない)
+  async revise(id, feedback, who) {
+    const p = pendingApprovals.get(id);
+    if (!p) return { ok: false, error: 'この返信案は既に処理済みです(画面を更新してください)' };
+    if (!feedback || !feedback.trim()) return { ok: false, error: '修正指示が空です' };
+    let newReply, newStage = null, newEvents = {}, newInternalNote = null;
+    try {
+      ({ reply: newReply, stage: newStage, events: newEvents, internalNote: newInternalNote } =
+        await generateReply({ userName: p.userName, messageText: p.messageText, conversationHistory: p.history, customerData: p.customerData, winnerInfo: p.winnerInfo, images: p.images, previousReply: p.reply, feedback }));
+    } catch (err) {
+      logger.error('UI revision failed:', err.message);
+      return { ok: false, error: `再生成に失敗しました: ${err.message}` };
+    }
+    const newId = Date.now().toString();
+    deps.updateApproval({ approvalId: id, status: 'revised', finalReply: null });
+    pendingApprovals.delete(id);
+    const bot = getBot();
+    if (bot && p.tgMsgId) {
+      try { await bot.editMessageText(`✏️ 承認画面から修正指示(${who}) → 🔄 #${newId}\n\n指示: ${feedback.slice(0, 300)}`, { chat_id: config.telegram.approvalChatId, message_id: p.tgMsgId }); } catch (e) {}
+      tgMsgToApproval.delete(p.tgMsgId);
+    }
+    if (newStage) { try { deps.upsertCustomer({ userId: p.userId, stage: newStage }); } catch (e) {} }
+    try { deps.applyWinnerEvents && deps.applyWinnerEvents({ lineUserId: p.userId, events: newEvents }); } catch (e) {}
+    lastFeedback.set(newId, feedback.replace(/\n+/g, ' ').trim().slice(0, 200));
+    const np = { userId: p.userId, userName: p.userName, reply: newReply, stage: newStage, messageText: p.messageText, customerData: p.customerData, history: p.history, winnerInfo: p.winnerInfo, images: p.images, tgMsgId: null, lastMsgAt: p.lastMsgAt, kind: p.kind, internalNote: newInternalNote };
+    pendingApprovals.set(newId, np);
+    deps.saveApproval({ approvalId: newId, userId: p.userId, generatedReply: newReply, status: 'pending' });
+    try { await sendApproval(newId, np, true); } catch (e) { logger.error('UI revise card failed:', e.message); }
+    logger.info(`UI revise #${id} -> #${newId} by ${who}`);
+    return { ok: true, newId };
+  },
+};
+
+module.exports = { setup, handleMessage, proposeFollowup, reissuePendingApprovals, reconcile, execRepair, ui };

@@ -4,6 +4,7 @@ const { setupLineWebhook, sendReply } = require('./line/webhook');
 const dbModule = require('./db/init');
 const { initTelegram } = require('./telegram/bot');
 const approvalFlow = require('./telegram/approval');
+const approvalUi = require('./web/ui');
 const logger = require('./utils/logger');
 async function main() {
   logger.info('=== LINE Bot Server Starting ===');
@@ -63,6 +64,11 @@ async function main() {
     try { res.json(await approvalFlow.execRepair({ action, tail })); }
     catch (e) { res.json({ ok: false, error: e.message }); }
   });
+
+  // 承認画面(LINE風UI): スタッフが公式LINEを開かずに文脈確認→承認まで完結できる画面。
+  // パーサはこの画面のルートにだけ適用する(LINE webhookの署名検証は生ボディが必要なため)
+  approvalUi.useParsers(express.json(), express.urlencoded({ extended: false }));
+  approvalUi.setup(app, approvalFlow);
 
   const port = process.env.PORT || 3000;
   app.listen(port, () => { logger.info(`Server on port ${port}`); logger.info('Ready'); });
