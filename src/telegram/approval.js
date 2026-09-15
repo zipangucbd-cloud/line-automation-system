@@ -893,7 +893,10 @@ async function reissuePendingApprovals() {
 // 判定方法: 自分でgetUpdatesを叩き、409(=別クライアント=Bot自身がポーリング中)が
 // 返らなければ受信が止まっていると見なす。外部から観測するので内部状態に依存しない。
 let pollDeadStreak = 0;
+const bootedAt = Date.now();
 async function checkTelegramPolling() {
+  // 起動直後はポーリングが確立する前なので判定しない(再起動のたびに誤検知のERRORが残るのを防ぐ)
+  if (Date.now() - bootedAt < 60000) return;
   const token = config.telegram.botToken;
   const base = process.env.TG_API_BASE || 'http://127.0.0.1:8081';
   if (!token) return;
