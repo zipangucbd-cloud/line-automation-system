@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { getBot } = require('./bot');
+const { getBot, pollingHealth } = require('./bot');
 const { generateReply, parseWinners, parseEvaluationNote, runRaw } = require('../claude/client');
 const { buildWinnerContext, offerStatusLine } = require('../utils/winner_match');
 const { negativeInfo } = require('../utils/negative_list');
@@ -886,55 +886,40 @@ async function reissuePendingApprovals() {
 }
 
 // ── Telegram受信(ポーリング)の死活監視 ──────────────────────
-// 2026-09-15の障害: 毎日01:10に出る502バーストに429(レート制限)が重なり、
-// node-telegram-bot-apiのポーリングループが停止したまま自力復帰しなかった。
-// 送信は都度のリクエストなので生きたままなので「カードは届くのにボタンだけ効かない」
-// という気づきにくい壊れ方になる(実際にスタッフの承認が9時間止まった)。
-// 判定方法: 自分でgetUpdatesを叩き、409(=別クライアント=Bot自身がポーリング中)が
-// 返らなければ受信が止まっていると見なす。外部から観測するので内部状態に依存しない。
-let pollDeadStreak = 0;
+// 2026-09-15の一次障害: 502バーストに429が重なりポーリングが停止したまま自力復帰せず、
+// 「カードは届くのにボタンだけ効かない」形で9時間業務が止まった。
+// 同日の二次障害: 復旧のため外からgetUpdatesを叩いて生死を判定したところ、その確認自体が
+// Bot自身のlong pollを終了させ、さらにstopPolling→startPollingが二重ループを生んで
+// 409の殴り合いになった(1日1万件超)。
+// → 判定はライブラリ内部の状態を受動的に見るだけにし、復旧はプロセス再起動に一本化する。
+let pollBadStreak = 0;
+let lastAutoRestartAt = 0;
 const bootedAt = Date.now();
 async function checkTelegramPolling() {
-  // 起動直後はポーリングが確立する前なので判定しない(再起動のたびに誤検知のERRORが残るのを防ぐ)
-  if (Date.now() - bootedAt < 60000) return;
-  const token = config.telegram.botToken;
-  const base = process.env.TG_API_BASE || 'http://127.0.0.1:8081';
-  if (!token) return;
-  // true=生存 / false=停止 / null=判定不能
-  const probe = async () => {
-    try {
-      const r = await fetch(`${base}/bot${token}/getUpdates?limit=1&timeout=0`, { signal: AbortSignal.timeout(15000) }).then((x) => x.json());
-      if (r && r.ok === false && r.error_code === 409) return true;
-      if (r && r.ok === true) return false;
-      return null;
-    } catch (e) { return null; } // 通信自体が不調なときは誤検知を避けて判定しない
-  };
-  let alive = await probe();
-  // 正常時でもポーリングの切れ目(次のgetUpdatesを出すまでの一瞬)に当たると409が返らない。
-  // 誤って受信を落とさないよう、停止と見えたときだけ間を置いて再確認する
-  if (alive === false) { await new Promise((r) => setTimeout(r, 2500)); alive = await probe(); }
-  if (alive === null) return;
-  if (alive) { pollDeadStreak = 0; return; }
-  pollDeadStreak++;
-  logger.error(`Telegram受信が停止している可能性 (${pollDeadStreak}回連続)`);
-  if (pollDeadStreak < 2) return; // 一時的なゆらぎでは動かさない(5分×2=10分で復旧)
+  if (Date.now() - bootedAt < 120000) return; // 起動直後は判定しない
   const bot = getBot();
-  if (!bot) return;
-  if (pollDeadStreak >= 4) {
-    logger.error('ポーリング再起動でも復旧しないため、プロセスごと再起動します');
-    try { await bot.sendMessage(config.telegram.approvalChatId, '⚠️ Telegramの受信が復旧しないため、Botを再起動します(約20秒後に承認カードが再発行されます)'); } catch (e) {}
-    const { spawn } = require('child_process');
-    spawn('/bin/sh', ['-c', 'sleep 1; launchctl kickstart -k gui/501/com.user.line.bot'], { detached: true, stdio: 'ignore' }).unref();
+  if (!bot || !pollingHealth) return;
+  const h = pollingHealth();
+  const stopped = !h.polling;                                   // ポーリングが止まっている
+  const storm = h.errCount >= 60 && Date.now() - h.lastErrAt < 5 * 60000; // エラーが出続けている
+  if (!stopped && !storm) { pollBadStreak = 0; return; }
+  pollBadStreak++;
+  const why = stopped ? 'ポーリング停止' : `ポーリングエラー連続${h.errCount}件`;
+  logger.error(`Telegram受信に異常 (${why}) ${pollBadStreak}回連続`);
+  if (pollBadStreak < 2) return; // 5分×2=10分で復旧に入る
+  if (Date.now() - lastAutoRestartAt < 3600000) {
+    logger.error('直近1時間に自動再起動済みのため見送り(手動確認が必要)');
     return;
   }
+  lastAutoRestartAt = Date.now();
+  pollBadStreak = 0;
+  logger.error('Telegram受信を復旧するためBotを再起動します');
   try {
-    await bot.stopPolling({ cancel: true });
-    await new Promise((r) => setTimeout(r, 2000));
-    await bot.startPolling({ restart: true });
-    pollDeadStreak = 0;
-    logger.info('Telegramのポーリングを再起動しました');
-    try { await bot.sendMessage(config.telegram.approvalChatId, '🔄 承認ボタンの受信が止まっていたため自動で復旧しました。効かなかったカードは、そのまま押していただけます。'); } catch (e) {}
-  } catch (e) { logger.error('ポーリング再起動に失敗:', e.message); }
+    await bot.sendMessage(config.telegram.approvalChatId,
+      `⚠️ 承認ボタンの受信が止まっていたため、Botを自動で再起動します(約20秒)。\n未処理のカードは再発行されますので、新しいカードで対応してください。`);
+  } catch (e) {}
+  const { spawn } = require('child_process');
+  spawn('/bin/sh', ['-c', 'sleep 1; launchctl kickstart -k gui/501/com.user.line.bot'], { detached: true, stdio: 'ignore' }).unref();
 }
 
 // ── 整合性チェック(5分ごと) ─────────────────────────────
