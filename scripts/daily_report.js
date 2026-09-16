@@ -114,12 +114,35 @@ const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_APPROVAL_CHAT_ID;
 if (!token || !chatId) { console.error('Telegram credentials missing'); process.exit(1); }
 
-if (process.argv.includes('--dry')) {
-  console.log(lines.join('\n'));
-  process.exit(0);
+// LINEの送信枠。2026-09-16に無料枠200通を使い切り、承認しても送れない状態に丸1日
+// 気づけなかった(ボタンが効かないように見えるだけで原因が分からなかった)ため、
+// 毎朝の残量確認を必須にする
+async function quotaLine() {
+  const t = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  if (!t) return null;
+  try {
+    const h = { Authorization: `Bearer ${t}` };
+    const q = await fetch('https://api.line.me/v2/bot/message/quota', { headers: h, signal: AbortSignal.timeout(15000) }).then((r) => r.json());
+    if (q && q.type === 'none') return 'LINE送信枠: 無制限プラン';
+    const c = await fetch('https://api.line.me/v2/bot/message/quota/consumption', { headers: h, signal: AbortSignal.timeout(15000) }).then((r) => r.json());
+    if (typeof q?.value !== 'number' || typeof c?.totalUsage !== 'number') return null;
+    const left = q.value - c.totalUsage;
+    const pct = Math.round((c.totalUsage / q.value) * 100);
+    const mark = left <= 0 ? '📛 使い切りました。プランを上げるまで送信できません'
+      : pct >= 90 ? '🚨 残りわずかです。プラン変更を検討してください'
+      : pct >= 80 ? '⚠️ 残りが少なくなっています' : '';
+    return `LINE送信枠: 残り${left}通 / ${q.value}通(${pct}%使用)${mark ? '\n' + mark : ''}`;
+  } catch (e) { return 'LINE送信枠: 取得に失敗しました'; }
 }
 
-const { tgCallRetry } = require('./tg_h2');
-tgCallRetry(token, 'sendMessage', { chat_id: chatId, text: lines.join('\n') }, 4)
-  .then(() => console.log('Daily report sent'))
-  .catch((e) => { console.error('Daily report error:', e.message); process.exit(1); });
+(async () => {
+  const ql = await quotaLine();
+  if (ql) lines.splice(5, 0, ql);
+  const text = lines.join('\n');
+  if (process.argv.includes('--dry')) { console.log(text); return; }
+  const { tgCallRetry } = require('./tg_h2');
+  try {
+    await tgCallRetry(token, 'sendMessage', { chat_id: chatId, text }, 4);
+    console.log('Daily report sent');
+  } catch (e) { console.error('Daily report error:', e.message); process.exit(1); }
+})();

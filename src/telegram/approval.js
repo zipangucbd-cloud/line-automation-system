@@ -799,7 +799,13 @@ function setupCallbacks() {
         try { if (deps.updateMarkerStatus) deps.updateMarkerStatus({ approvalId: id, status: 'approved' }); } catch (e) {}
       }
       else { pendingApprovals.set(id, p); }
-      await bot.answerCallbackQuery(q.id, { text: ok ? '✅ 送信完了' : '❌ 送信失敗(もう一度押してください)' });
+      if (!ok) {
+        const why = await sendFailReason();
+        await bot.answerCallbackQuery(q.id, { text: why.slice(0, 190), show_alert: true });
+        try { await bot.sendMessage(q.message.chat.id, `❌ ${p.userName}様への送信に失敗しました。\n${why}`, { reply_to_message_id: q.message.message_id }); } catch (e) {}
+      } else {
+        await bot.answerCallbackQuery(q.id, { text: '✅ 送信完了' });
+      }
       if (ok) { try { await bot.editMessageText(`✅ 承認・送信済 (${who})\n\n${q.message.text}`, { chat_id: q.message.chat.id, message_id: q.message.message_id }); } catch (e) {} }
 
       if (ok && p.tgMsgId) tgMsgToApproval.delete(p.tgMsgId);
@@ -883,6 +889,24 @@ async function reissuePendingApprovals() {
     } catch (e) { logger.error(`Reissue failed (${r.approval_id}):`, e.message); }
   }
   if (n) logger.info(`Reissue done: ${n}件`);
+}
+
+// 送信に失敗したとき、LINEの月間送信枠切れかどうかを判定して原因を返す。
+// 2026-09-16: 枠を使い切ると「送信失敗(もう一度押してください)」としか出ず、
+// 何度押しても無駄なことが伝わらないまま丸1日業務が止まったため
+async function sendFailReason() {
+  const t = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  if (!t) return '送信に失敗しました';
+  try {
+    const h = { Authorization: `Bearer ${t}` };
+    const q = await fetch('https://api.line.me/v2/bot/message/quota', { headers: h, signal: AbortSignal.timeout(10000) }).then((r) => r.json());
+    if (q && q.type === 'none') return '送信に失敗しました(通信エラーの可能性。時間をおいて再度お試しください)';
+    const c = await fetch('https://api.line.me/v2/bot/message/quota/consumption', { headers: h, signal: AbortSignal.timeout(10000) }).then((r) => r.json());
+    if (typeof q?.value === 'number' && typeof c?.totalUsage === 'number' && q.value - c.totalUsage <= 0) {
+      return '📛 LINEの今月の送信可能数を使い切っています。プランを変更するまで送信できません(何度押しても送れません)';
+    }
+  } catch (e) {}
+  return '送信に失敗しました(通信エラーの可能性。時間をおいて再度お試しください)';
 }
 
 // ── Telegram受信(ポーリング)の死活監視 ──────────────────────
@@ -1055,7 +1079,7 @@ const ui = {
     if (!outgoing) return { ok: false, error: '送信できる本文がありません' };
     pendingApprovals.delete(id); // 送信前に消し込む(二重送信の防止)
     const ok = await deps.sendLineReply(p.userId, outgoing);
-    if (!ok) { pendingApprovals.set(id, p); return { ok: false, error: 'LINEへの送信に失敗しました。もう一度お試しください' }; }
+    if (!ok) { pendingApprovals.set(id, p); return { ok: false, error: await sendFailReason() }; }
     deps.saveConversation({ userId: p.userId, direction: 'outgoing', content: outgoing });
     deps.updateApproval({ approvalId: id, status: 'approved', finalReply: outgoing });
     try { if (deps.updateMarkerStatus) deps.updateMarkerStatus({ approvalId: id, status: 'approved' }); } catch (e) {}
