@@ -661,7 +661,10 @@ function setupCallbacks() {
     try {
       const w = deps.findWinnerByXid && deps.findWinnerByXid(key);
       if (w && w.line_user_id) return { userId: w.line_user_id, name: `@${w.x_id}` };
-      if (w) return { error: `@${w.x_id} はまだLINEと紐付いていません(ご本人がLINEでIDを名乗ると紐付きます)` };
+      // 当選者レコードが未接続でも、顧客側にX IDが記録されていればそちらで辿る
+      const c = deps.findCustomerByXHandle && deps.findCustomerByXHandle(key);
+      if (c) return { userId: c.user_id, name: `${c.display_name || 'お客様'}(@${key})` };
+      if (w) return { error: `@${w.x_id} はまだLINEでやり取りが始まっていません(ご本人がLINEでIDを名乗ると繋がります)` };
     } catch (e) {}
     const all = (deps.listRecentCustomers ? deps.listRecentCustomers(365) : []) || [];
     const hit = all.filter((c) => String(c.display_name || '').toLowerCase().includes(key));
@@ -1026,6 +1029,11 @@ async function checkTelegramPolling() {
 // 2) 受信から20分〜3時間、返信もカードも無い相手 → 会話履歴から生成をやり直す(最大2回、以後は🚨警告)
 const regenAttempts = new Map(); // userId -> 試行回数
 async function reconcile() {
+  // 顧客側にX IDがあるのに当選者と未接続のものを繋ぐ(進捗表示・フォローアップが効くように)
+  try {
+    const n = deps.linkWinnersByXHandle ? deps.linkWinnersByXHandle() : 0;
+    if (n) logger.info(`当選者とLINEの紐付けを${n}件追加しました`);
+  } catch (e) { logger.error('Reconcile(link) failed:', e.message); }
   try { await checkTelegramPolling(); } catch (e) { logger.error('Reconcile(polling) failed:', e.message); }
   try { await reissuePendingApprovals(); } catch (e) { logger.error('Reconcile(reissue) failed:', e.message); }
   try {

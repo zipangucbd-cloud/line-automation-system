@@ -19,6 +19,8 @@ async function main() {
     listUnansweredUsers: dbModule.listUnansweredUsers,
     getLastIncoming: dbModule.getLastIncoming,
     listRecentCustomers: dbModule.listRecentCustomers,
+    findCustomerByXHandle: dbModule.findCustomerByXHandle,
+    linkWinnersByXHandle: dbModule.linkWinnersByXHandle,
     getCustomer: dbModule.getCustomer,
     upsertCustomer: dbModule.upsertCustomer,
     saveKnowledgeGap: dbModule.saveKnowledgeGap,

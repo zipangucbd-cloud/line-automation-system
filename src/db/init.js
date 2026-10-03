@@ -202,4 +202,24 @@ function listPendingApprovals(days = 3) {
   return db.prepare(`SELECT approval_id, user_id, generated_reply, created_at, tg_msg_id FROM approvals WHERE status = 'pending' AND created_at >= datetime('now', ?)`).all(`-${days} days`);
 }
 
-module.exports = { listPendingApprovals, listUnansweredUsers, listRecentCustomers, saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+// 顧客側に記録されたX IDから顧客を引く(当選者レコードと未接続でも辿れるように)
+function findCustomerByXHandle(handle) {
+  const h = String(handle || '').replace(/^@/, '').trim();
+  if (!h) return null;
+  return db.prepare('SELECT * FROM customers WHERE lower(x_handle) = lower(?) LIMIT 1').get(h);
+}
+
+// 顧客のx_handleと当選者のx_idが一致しているのに未接続のものを繋ぐ。
+// 本人確認の過程でcustomers.x_handleだけが埋まり、winners.line_user_idが空のまま残る
+// ケースがあり(2026-10-03時点で9件)、進捗表示・フォローアップ・重複検知が効かなくなる
+function linkWinnersByXHandle() {
+  const r = db.prepare(`
+    UPDATE winners SET line_user_id = (
+      SELECT c.user_id FROM customers c WHERE lower(c.x_handle) = lower(winners.x_id) LIMIT 1
+    ), updated_at = CURRENT_TIMESTAMP
+    WHERE line_user_id IS NULL AND status NOT IN ('done','cancelled')
+      AND EXISTS (SELECT 1 FROM customers c WHERE lower(c.x_handle) = lower(winners.x_id))`).run();
+  return r.changes;
+}
+
+module.exports = { findCustomerByXHandle, linkWinnersByXHandle, listPendingApprovals, listUnansweredUsers, listRecentCustomers, saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
