@@ -650,6 +650,74 @@ function setupCallbacks() {
     } catch (e) {}
   });
 
+  // スタッフが「この人にこれを伝えて」と頼むための入口。
+  // これまで運営から話しかける手段は自動フォローアップとShopifyの発送検知しかなく、
+  // 「発送通知を送って」「キャッシュバックしたので連絡して」「下書きをこう直して返して」
+  // といった現場からの依頼を受け取る口が存在しなかった(2026-10-03に追加)
+  function resolveTarget(token) {
+    const raw = String(token || '').trim();
+    const key = raw.replace(/^@/, '').toLowerCase();
+    if (!key) return { error: '誰に送るのかが分かりませんでした' };
+    try {
+      const w = deps.findWinnerByXid && deps.findWinnerByXid(key);
+      if (w && w.line_user_id) return { userId: w.line_user_id, name: `@${w.x_id}` };
+      if (w) return { error: `@${w.x_id} はまだLINEと紐付いていません(ご本人がLINEでIDを名乗ると紐付きます)` };
+    } catch (e) {}
+    const all = (deps.listRecentCustomers ? deps.listRecentCustomers(365) : []) || [];
+    const hit = all.filter((c) => String(c.display_name || '').toLowerCase().includes(key));
+    if (hit.length === 1) return { userId: hit[0].user_id, name: hit[0].display_name };
+    if (hit.length > 1) return { error: `候補が複数あります: ${hit.slice(0, 6).map((c) => c.display_name).join(' / ')}\nもう少し詳しく指定してください` };
+    return { error: `「${raw}」に該当する方が見つかりませんでした。@X_ID かLINEの表示名で指定してください` };
+  }
+
+  function knowledgeSystem() {
+    let out = '';
+    try { out = fs.readFileSync(path.join(__dirname, '../knowledge/system_prompt.md'), 'utf-8'); } catch (e) {}
+    try {
+      const l = fs.readFileSync(path.join(__dirname, '../knowledge/learned.md'), 'utf-8').trim();
+      if (l) out += `\n\n---\n# 【最優先】運営から直接教わった知識\n${l}\n`;
+    } catch (e) {}
+    return out;
+  }
+
+  bot.onText(/^\/(伝えて|連絡|送信|tell)(?:@\S+)?(?:\s|\n)([\s\S]+)$/, async (msg, match) => {
+    if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
+    const who = msg.from ? (msg.from.first_name || msg.from.username || '担当者') : '担当者';
+    const parts = match[2].trim().match(/^(\S+)[\s\n]*([\s\S]*)$/);
+    const t = resolveTarget(parts && parts[1]);
+    const instruction = ((parts && parts[2]) || '').trim();
+    if (t.error) {
+      await bot.sendMessage(msg.chat.id, `⚠️ ${t.error}\n\n【書き方】\n/伝えて @X_ID 伝えたい内容\n例) /伝えて @abc123 発送しました。追跡番号は1234-5678-9012です`);
+      return;
+    }
+    if (!instruction) {
+      await bot.sendMessage(msg.chat.id, '⚠️ 伝えたい内容が書かれていません。\n\n例) /伝えて @abc123 キャッシュバックの振込が完了しました');
+      return;
+    }
+    try { await bot.sendMessage(msg.chat.id, `✍️ ${t.name}様へのご連絡を作成しています…`); } catch (e) {}
+
+    const customer = deps.getCustomer(t.userId) || {};
+    const hist = (deps.getRecentConversations(t.userId, 12) || []).reverse()
+      .map((c) => `${c.direction === 'incoming' ? 'お客様' : '運営'}: ${String(c.content).slice(0, 300)}`).join('\n----\n');
+    let winnerInfo = '';
+    try {
+      const w = deps.findWinnerByLineUser && deps.findWinnerByLineUser(t.userId);
+      if (w) winnerInfo = offerStatusLine(w);
+    } catch (e) {}
+    const prompt = `【運営スタッフからの依頼】\n${instruction}\n\n【お届け先】${t.name}様(現在のステージ: ${customer.stage || '不明'})\n${winnerInfo ? `【進行状況】\n${winnerInfo}\n` : ''}\n【これまでの会話(古い順)】\n${hist || '(履歴なし)'}\n\n上の依頼の内容を、このお客様へ送るメッセージとして1通にまとめてください。\n・依頼文をそのまま貼るのではなく、会話の流れに沿った自然な文面にする\n・依頼に含まれる具体的な情報(番号・金額・日付・URL・修正指示の中身など)は省略せず正確に反映する\n・依頼に書かれていない事実を足さない。情報が足りない場合は、その部分を文中で補わずに「[要確認: 何が不足しているか]」と先頭に書く\n・返信本文だけを出力し、<<...>>のような記号や社内向けの説明は書かない`;
+
+    let text;
+    try {
+      text = (await runRaw({ system: knowledgeSystem(), prompt, maxTokens: 1200, label: 'staffMessage' })).trim();
+    } catch (e) {
+      logger.error('伝えて generation failed:', e.message);
+      try { await bot.sendMessage(msg.chat.id, `❌ 文面の作成に失敗しました: ${e.message}`); } catch (e2) {}
+      return;
+    }
+    const ok = await proposeFollowup({ userId: t.userId, userName: t.name, text, label: `${who}さんからの依頼` });
+    if (!ok) { try { await bot.sendMessage(msg.chat.id, '⚠️ 承認カードの作成に失敗しました'); } catch (e) {} }
+  });
+
   bot.onText(/^\/(ヘルプ|help|使い方)(?:@\S+)?$/, async (msg) => {
     if (String(msg.chat.id) !== String(config.telegram.approvalChatId)) return;
     await bot.sendMessage(msg.chat.id, [
@@ -672,6 +740,12 @@ function setupCallbacks() {
       '(消えたカードの再発行・未応答の生成やり直しが自動で走ります)',
       '/直して(困りごと) … 例: /直して Hirokoさんへの返信が来てない',
       '(日本語を理解して、作り直し・再発行など安全な操作だけ自動でやります)',
+      '',
+      '【お客様にこちらから連絡する】',
+      '/伝えて @X_ID 伝えたい内容',
+      '　例) /伝えて @abc123 発送しました。追跡番号は1234-5678-9012です',
+      '　例) /伝えて @abc123 下書きを添削。引用ではなく通常投稿で、末尾に #セクスタシー を追加',
+      '(会話の流れに合わせた文面を作り、承認カードにしてお出しします)',
       '',
       '【当選者を登録する】',
       '当選者が決まったら、そのまま貼り付けてください。',
