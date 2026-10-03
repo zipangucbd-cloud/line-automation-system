@@ -105,7 +105,54 @@ async function lineQuotaLeft() {
     else if (idle >= 30) { aimFinal = '1ヶ月以上ご連絡がないため、その後の状況を伺い、必要なら再度ご案内する'; label = `1ヶ月超・進捗確認(${idle}日)`; }
     targets.push({ ...r, idle, aim: aimFinal, label });
   }
-  targets.sort((a, b) => b.idle - a.idle);
+  // ── 期限トラック(到着日・注文日を起点にする) ────────────────
+  // 会話起点の停滞チェックだけでは「やり取りは続いているのにレビューしない人」を
+  // 取りこぼす。業務ルール「レビューは商品到着後2ヶ月以内」を守らせるため、
+  // 到着日(なければ注文日・発送日)からの経過でも必ず声をかける。
+  const skipUser = (uid, lastFu) => {
+    if (utc(lastFu) && now - utc(lastFu) < 3 * day) return true;
+    return !!db.prepare("SELECT 1 FROM approvals WHERE user_id = ? AND status = 'pending' LIMIT 1").get(uid);
+  };
+  const deadline = [];
+  const wrows = db.prepare(`
+    SELECT w.x_id, w.line_user_id, w.arrived_at, w.shipped_at, w.order_date, w.plan,
+           c.display_name, c.stage, c.last_followup_at
+    FROM winners w JOIN customers c ON c.user_id = w.line_user_id
+    WHERE w.status NOT IN ('done','cancelled') AND w.reviewed_at IS NULL`).all();
+  for (const w of wrows) {
+    if (skipUser(w.line_user_id, w.last_followup_at)) continue;
+    const arrived = utc(w.arrived_at);
+    const ordered = utc(w.order_date) || utc(w.shipped_at);
+    let aim = null, label = null, since = 0;
+    if (arrived) {
+      since = Math.floor((now - arrived) / day);
+      if (since >= 60) {
+        aim = 'レビュー期限(商品到着後2ヶ月)を過ぎているため、最終のご連絡として、レビュー投稿が難しい場合は商品代金のご負担をお願いする旨を丁寧に伝える';
+        label = `到着から${since}日・最終催促`;
+      } else if (since >= 50) {
+        aim = `レビュー投稿の期限(商品到着後2ヶ月)まで残り${Math.max(0, 60 - since)}日であることをお伝えし、投稿の目処を伺う`;
+        label = `期限まで残り${Math.max(0, 60 - since)}日`;
+      } else if (since >= 30) {
+        aim = '商品到着から1ヶ月が経つため、お試しいただけたか・レビュー投稿の目処はいつ頃かを伺う';
+        label = `到着から${since}日・進捗確認`;
+      }
+    } else if (ordered) {
+      since = Math.floor((now - ordered) / day);
+      if (since >= 7) {
+        aim = '商品がお手元に届いたかを確認する。届いていれば、お試しになる前にご一報いただきたい旨も添える';
+        label = `注文から${since}日・到着確認`;
+      }
+    }
+    if (!aim) continue;
+    deadline.push({ user_id: w.line_user_id, display_name: w.display_name, stage: w.stage || '(不明)', idle: since, aim, label });
+  }
+  deadline.sort((a, b) => b.idle - a.idle);
+  // 期限ものを先に処理し、会話起点の停滞は重複を除いて後ろに付ける
+  const seen = new Set(deadline.map((d) => d.user_id));
+  const merged = deadline.concat(targets.filter((t) => !seen.has(t.user_id)));
+  targets.length = 0;
+  targets.push(...merged);
+
 
   let sys = '';
   try {
