@@ -11,6 +11,10 @@
 //
 // 記帳は常に行い、通知カードは「まだ伝えていない場合」だけ立てる(二重連絡の防止)。
 require('dotenv').config();
+// この回線ではShopifyのIPv4アドレスが遮断されており(curlは通るがnodeのfetchはETIMEDOUT)、
+// 名前解決の順番次第で成功したり失敗したりする。IPv6は安定して通るので優先順を固定する。
+// ※Telegramは逆にIPv4のみ疎通するため、あちらはローカルのHTTP/2プロキシ経由にしている
+require('dns').setDefaultResultOrder('ipv6first');
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
@@ -35,6 +39,21 @@ for (const [n, t] of [['order_number', 'TEXT'], ['order_date', 'DATETIME'], ['tr
 }
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+
+// 一時的な名前解決・接続の失敗で巡回ごと落ちないように再試行する
+async function fetchRetry(url, opts = {}, tries = 3) {
+  let last;
+  for (let i = 1; i <= tries; i++) {
+    try {
+      return await fetch(url, { ...opts, signal: AbortSignal.timeout(30000) });
+    } catch (e) {
+      last = e;
+      log(`接続に失敗(${i}/${tries}): ${e.cause?.code || e.message}`);
+      if (i < tries) await new Promise((r) => setTimeout(r, i * 3000));
+    }
+  }
+  throw last;
+}
 const norm = (s) => String(s || '').trim().replace(/^#/, '').toUpperCase();
 const validId = (s) => /^[a-z0-9_]{1,15}$/.test(String(s || '').toLowerCase());
 
@@ -49,10 +68,9 @@ async function tg(text) {
 }
 
 (async () => {
-  const tr = await fetch(`https://${SHOP}/admin/oauth/access_token`, {
+  const tr = await fetchRetry(`https://${SHOP}/admin/oauth/access_token`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ grant_type: 'client_credentials', client_id: CID, client_secret: SEC }),
-    signal: AbortSignal.timeout(20000),
   }).then((r) => r.json());
   if (!tr.access_token) { console.error('token grant failed'); process.exit(1); }
   const H = { 'X-Shopify-Access-Token': tr.access_token };
@@ -62,7 +80,7 @@ async function tg(text) {
   let url = `https://${SHOP}/admin/api/2026-07/orders.json?status=any&created_at_min=${encodeURIComponent(since)}&limit=250&fields=id,name,order_number,confirmation_number,created_at,shipping_address,fulfillments`;
   const orders = [];
   for (let page = 0; page < 3 && url; page++) {
-    const res = await fetch(url, { headers: H, signal: AbortSignal.timeout(30000) });
+    const res = await fetchRetry(url, { headers: H });
     const j = await res.json();
     orders.push(...(j.orders || []));
     const link = res.headers.get('link') || '';
@@ -133,7 +151,7 @@ async function tg(text) {
       const msg = `お世話になっております。\n\n本日、商品を発送いたしました🙏\n${carrier}(クール便)にてお届けいたします。\n\n追跡番号: ${tn}\n\nクール便のため、対面でのお受け取りをお願いいたします(置き配はご利用いただけません)。\nお受け取りになりましたら、こちらのLINEにご一報くださいませ。\n\n引き続き宜しくお願いいたします。`;
       if (DRY) { log(`  [dry] 発送通知カードを作成: @${w.x_id}`); proposed++; continue; }
       try {
-        const pr = await fetch('http://localhost:3000/internal/propose', {
+        const pr = await fetch('http://127.0.0.1:3000/internal/propose', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ userId: w.line_user_id, userName: `@${w.x_id}`, text: msg, label: `発送通知(${o.name} / 追跡 ${tn})` }),
           signal: AbortSignal.timeout(20000),
