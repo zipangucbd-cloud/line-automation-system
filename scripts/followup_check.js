@@ -21,9 +21,10 @@ const day = 86400000;
 const utc = (s) => (s ? new Date(String(s).replace(' ', 'T') + 'Z').getTime() : null);
 
 // 連打防止のため、顧客ごとの最終フォロー日時を持つ
-if (!db.prepare('PRAGMA table_info(customers)').all().some((c) => c.name === 'last_followup_at')) {
-  db.exec('ALTER TABLE customers ADD COLUMN last_followup_at DATETIME');
-}
+const ccols = db.prepare('PRAGMA table_info(customers)').all().map((c) => c.name);
+if (!ccols.includes('last_followup_at')) db.exec('ALTER TABLE customers ADD COLUMN last_followup_at DATETIME');
+// 商品提供前の方を何度も追いかけないよう、声をかけた回数を数える
+if (!ccols.includes('followup_count')) db.exec('ALTER TABLE customers ADD COLUMN followup_count INTEGER DEFAULT 0');
 
 // ステージごとの「何日放置されたら声をかけるか」と、声かけの狙い
 const RULES = [
@@ -38,6 +39,16 @@ const RULES = [
   [/^S9_/, 7, 'キャッシュバックの手続き、または次の商品のご案内へのご返答を伺う'],
   [/^対応保留/, 7, '保留となっている件について、その後の状況を伺う'],
 ];
+// まだ商品をお渡ししていない段階(S1〜S4・対応保留)は、こちらに回収すべきものが無い。
+// 問診や本人確認のスクリーンショットを短い間隔で何度も求めると、個人情報を
+// しつこく聞き出しているように見えてしまうため、回数と間隔を強く絞る。
+// ・1回目は5日、2回目は前回から14日あけて、そこで打ち切る(辞退とみなして静かに置く)
+// 商品をお渡し済み(S5以降)は、レビューがお約束なので従来どおり追いかける。
+const PRE_PROVISION = /^(S[1-4]_|対応保留)/;
+const PRE_MAX = 2;
+const PRE_FIRST_DAYS = 5;
+const PRE_SECOND_DAYS = 14;
+
 function ruleFor(stage) {
   for (const [re, d, aim] of RULES) if (re.test(stage)) return { days: d, aim };
   return { days: 5, aim: 'その後の状況を伺う' };
@@ -80,7 +91,7 @@ async function lineQuotaLeft() {
 
   if (DRY && left !== null && left <= 0) console.log('※送信枠は尽きているが、--dryのため対象の確認だけ続行する');
   const rows = db.prepare(`
-    SELECT c.user_id, c.display_name, c.stage, c.last_followup_at,
+    SELECT c.user_id, c.display_name, c.stage, c.last_followup_at, c.followup_count,
            (SELECT MAX(timestamp) FROM conversations v WHERE v.user_id = c.user_id) last_at,
            (SELECT direction FROM conversations v WHERE v.user_id = c.user_id ORDER BY v.id DESC LIMIT 1) last_dir
     FROM customers c
@@ -92,7 +103,13 @@ async function lineQuotaLeft() {
     if (!r.last_at) continue;
     const idle = Math.floor((now - utc(r.last_at)) / day);
     const { days, aim } = ruleFor(r.stage);
-    if (idle < days) continue;
+    const isPre = PRE_PROVISION.test(r.stage);
+    const count = r.followup_count || 0;
+    if (isPre) {
+      if (count >= PRE_MAX) continue; // 2回声をかけて反応が無ければ、それ以上は追わない
+      if (idle < PRE_FIRST_DAYS) continue;
+      if (count >= 1 && (!utc(r.last_followup_at) || now - utc(r.last_followup_at) < PRE_SECOND_DAYS * day)) continue;
+    } else if (idle < days) continue;
     if (r.last_dir === 'incoming') { waitingUs.push({ ...r, idle }); continue; }
     if (utc(r.last_followup_at) && now - utc(r.last_followup_at) < 3 * day) continue; // 連打防止
     // 未処理の承認カードが残っている人には重ねて提案しない
@@ -101,6 +118,10 @@ async function lineQuotaLeft() {
     // 経過が長い場合は催促の段階を上げる
     let aimFinal = aim;
     let label = `${r.stage} ${idle}日停滞`;
+    if (isPre) {
+      aimFinal = `${aim}。ただし商品はまだお渡ししていない段階なので、催促の色を出さず「ご都合が合わなければ無理をなさらないでください」「ご興味が薄れていらっしゃる場合はご返信不要です」という逃げ道を必ず添える`;
+      label = `${r.stage} ${idle}日(提供前・${count + 1}回目/全${PRE_MAX}回)`;
+    }
     if (idle >= 60) { aimFinal = 'レビュー期限(商品到着後2ヶ月)を過ぎているため、最終のご連絡として、レビュー投稿が難しい場合は商品代金のご負担をお願いする旨を丁寧に伝える'; label = `2ヶ月超・最終催促(${idle}日)`; }
     else if (idle >= 30) { aimFinal = '1ヶ月以上ご連絡がないため、その後の状況を伺い、必要なら再度ご案内する'; label = `1ヶ月超・進捗確認(${idle}日)`; }
     targets.push({ ...r, idle, aim: aimFinal, label });
@@ -188,7 +209,7 @@ ${hist}
         signal: AbortSignal.timeout(30000),
       }).then((r) => r.json());
       if (j.ok) {
-        db.prepare('UPDATE customers SET last_followup_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(t.user_id);
+        db.prepare('UPDATE customers SET last_followup_at = CURRENT_TIMESTAMP, followup_count = COALESCE(followup_count, 0) + 1 WHERE user_id = ?').run(t.user_id);
         sent++;
       }
     } catch (e) { console.error(`propose失敗 ${t.display_name}:`, e.message); }
