@@ -69,7 +69,12 @@ function updateApproval({ approvalId, status, finalReply }) { db.prepare('UPDATE
 // Telegramから登録された当選者を追加する。同じIDの未完了案件があれば重複として知らせる。
 function addWinner({ xId, campaign, offer, tier = 'normal', notes = null }) {
   const id = String(xId).replace(/^@/, '').trim();
-  const dup = db.prepare("SELECT id, campaign FROM winners WHERE lower(x_id) = lower(?) AND status NOT IN ('done','cancelled')").get(id);
+  const dup = db.prepare("SELECT id, campaign, status FROM winners WHERE lower(x_id) = lower(?) AND status NOT IN ('done','cancelled')").get(id);
+  // 同じ企画の当選者リストを二度投入しても行が増えないようにする。
+  // 以前これで同じ人が2行になり、空の行を引いて「発送済みなのに未着手に見える」
+  // 状態が起きた(2026-10-21に12人分を集約して復旧)
+  const sameCamp = db.prepare("SELECT id, campaign, status FROM winners WHERE lower(x_id) = lower(?) AND campaign = ? AND status NOT IN ('cancelled')").get(id, campaign);
+  if (sameCamp) return { id: sameCamp.id, skipped: true, existing: sameCamp };
   const r = db.prepare('INSERT INTO winners (x_id, campaign, offer, tier, notes) VALUES (?, ?, ?, ?, ?)').run(id, campaign, offer, tier, notes);
   return { id: r.lastInsertRowid, duplicate: dup || null };
 }

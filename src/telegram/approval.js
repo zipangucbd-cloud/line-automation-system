@@ -488,11 +488,12 @@ function setupCallbacks() {
       await bot.sendMessage(msg.chat.id, '⚠️ 当選者を読み取れませんでした。@IDと提供内容が含まれているか確認してください。');
       return;
     }
-    const lines = []; const dups = []; const negs = []; let ng = 0;
+    const lines = []; const dups = []; const negs = []; const already = []; let ng = 0;
     for (const w of list) {
       if (!w.x_id || !/^[A-Za-z0-9_]{1,15}$/.test(w.x_id)) { ng++; continue; }
       try {
         const r = deps.addWinner({ xId: w.x_id, campaign: w.campaign || '(企画名なし)', offer: w.offer || 'unknown', tier: w.tier === 'strong' ? 'strong' : 'normal', notes: w.notes || null });
+        if (r.skipped) { already.push(`・@${w.x_id}(${r.existing.campaign} / ${r.existing.status})`); continue; }
         lines.push(`・@${w.x_id} — ${OFFER_LABEL[w.offer] || w.offer}${w.tier === 'strong' ? ' 🔶強' : ''}`);
         if (r.duplicate) dups.push(`@${w.x_id}(既存:「${r.duplicate.campaign}」が未完了)`);
         const neg = negativeInfo(w.x_id);
@@ -500,7 +501,8 @@ function setupCallbacks() {
       } catch (e) { logger.error('addWinner failed:', e.message); ng++; }
     }
     const parts = [`✅ ${lines.length}名を当選者リストに登録しました (登録: ${who})`, '', `企画: ${list[0].campaign || '(企画名なし)'}`, ...lines];
-    if (dups.length) parts.push('', '⚠️ 同じIDで未完了の案件があります(重ねて登録しました):', ...dups.map((d) => `・${d}`));
+    if (already.push && already.length) parts.push('', 'ℹ️ すでに同じ企画で登録済みのため、重ねずにそのままにしました:', ...already);
+    if (dups.length) parts.push('', '⚠️ 別の企画で未完了の案件があります(今回は新しく登録しました):', ...dups.map((d) => `・${d}`));
     if (negs.length) parts.push('', '🚨【警告】過去にネガティブレビュー(「良くない」評価)の人が含まれています!', ...negs, '選出ミスの可能性があります。取り消す場合は大塚さん(司令塔)に伝えてください。');
     if (parsed.warnings && parsed.warnings.length) parts.push('', '📌 確認してください:', ...parsed.warnings.map((w) => `・${w}`));
     if (ng) parts.push('', `⚠️ ${ng}件は読み取れず登録できませんでした`);
