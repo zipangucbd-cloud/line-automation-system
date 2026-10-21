@@ -44,7 +44,11 @@ const RULES = [
 // しつこく聞き出しているように見えてしまうため、回数と間隔を強く絞る。
 // ・1回目は5日、2回目は前回から14日あけて、そこで打ち切る(辞退とみなして静かに置く)
 // 商品をお渡し済み(S5以降)は、レビューがお約束なので従来どおり追いかける。
-const PRE_PROVISION = /^(S[1-4]_|対応保留)/;
+// 「提供前かどうか」はステージ名ではなく、商品を渡した証拠(注文番号・発送日・到着日)の
+// 有無で判定する。ステージだけで見ると S5_注文番号待ち の方(まだ注文していない)が
+// 提供後扱いになって無制限に催促され、逆に 対応保留 の方(実は到着済み)が
+// 提供前扱いになってしまう — 2026-10-21の検証で両方のズレが見つかったため。
+const isProvisioned = (r) => !!(r.order_number || r.shipped_at || r.arrived_at);
 const PRE_MAX = 2;
 const PRE_FIRST_DAYS = 5;
 const PRE_SECOND_DAYS = 14;
@@ -93,9 +97,12 @@ async function lineQuotaLeft() {
   const rows = db.prepare(`
     SELECT c.user_id, c.display_name, c.stage, c.last_followup_at, c.followup_count,
            (SELECT MAX(timestamp) FROM conversations v WHERE v.user_id = c.user_id) last_at,
-           (SELECT direction FROM conversations v WHERE v.user_id = c.user_id ORDER BY v.id DESC LIMIT 1) last_dir
+           (SELECT direction FROM conversations v WHERE v.user_id = c.user_id ORDER BY v.id DESC LIMIT 1) last_dir,
+           w.order_number, w.shipped_at, w.arrived_at
     FROM customers c
-    WHERE c.stage IS NOT NULL AND c.stage NOT IN ('完了')`).all();
+    LEFT JOIN winners w ON w.line_user_id = c.user_id AND w.status NOT IN ('cancelled')
+    WHERE c.stage IS NOT NULL AND c.stage NOT IN ('完了')
+    GROUP BY c.user_id`).all();
 
   const targets = [];   // こちらが最後に話していて、相手が沈黙している人(=声をかける)
   const waitingUs = []; // 相手が最後に話していて、こちらの返信が止まっている人(=声をかけない)
@@ -103,7 +110,7 @@ async function lineQuotaLeft() {
     if (!r.last_at) continue;
     const idle = Math.floor((now - utc(r.last_at)) / day);
     const { days, aim } = ruleFor(r.stage);
-    const isPre = PRE_PROVISION.test(r.stage);
+    const isPre = !isProvisioned(r); // 商品をまだ渡していない方は回数と間隔を強く絞る
     const count = r.followup_count || 0;
     if (isPre) {
       if (count >= PRE_MAX) continue; // 2回声をかけて反応が無ければ、それ以上は追わない
@@ -120,7 +127,7 @@ async function lineQuotaLeft() {
     let label = `${r.stage} ${idle}日停滞`;
     if (isPre) {
       aimFinal = `${aim}。ただし商品はまだお渡ししていない段階なので、催促の色を出さず「ご都合が合わなければ無理をなさらないでください」「ご興味が薄れていらっしゃる場合はご返信不要です」という逃げ道を必ず添える`;
-      label = `${r.stage} ${idle}日(提供前・${count + 1}回目/全${PRE_MAX}回)`;
+      label = `${r.stage} ${idle}日(未提供・${count + 1}回目/全${PRE_MAX}回)`;
     }
     if (idle >= 60) { aimFinal = 'レビュー期限(商品到着後2ヶ月)を過ぎているため、最終のご連絡として、レビュー投稿が難しい場合は商品代金のご負担をお願いする旨を丁寧に伝える'; label = `2ヶ月超・最終催促(${idle}日)`; }
     else if (idle >= 30) { aimFinal = '1ヶ月以上ご連絡がないため、その後の状況を伺い、必要なら再度ご案内する'; label = `1ヶ月超・進捗確認(${idle}日)`; }
