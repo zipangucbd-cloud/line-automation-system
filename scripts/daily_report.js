@@ -71,6 +71,16 @@ try {
   for (const r of rows) alerts.push(`照合未完了でS3以降: [${r.u}] ${r.stage}(当選者と未紐付け)`);
 } catch (e) {}
 
+// 3b) 提供段階まで進んでいるのに注文・発送の記録が無い人(スクショからの読み取り漏れ)
+try {
+  const rows = db.prepare(`
+    SELECT c.display_name, c.stage, w.x_id FROM customers c
+    JOIN winners w ON w.line_user_id = c.user_id AND w.status NOT IN ('cancelled')
+    WHERE w.order_number IS NULL AND w.shipped_at IS NULL AND w.arrived_at IS NULL
+      AND substr(c.stage,1,2) IN ('S5','S6','S7','S8','S9')`).all();
+  for (const r of rows) alerts.push(`提供の記録が空: ${r.display_name}(@${r.x_id} / ${r.stage}) — 注文番号を控えてください`);
+} catch (e) {}
+
 // 4) ログ由来: 生成失敗 / 従量課金ルートの使用(=Max枠枯渇の兆候) / ポーリングエラー多発
 try {
   const day = 86400000;

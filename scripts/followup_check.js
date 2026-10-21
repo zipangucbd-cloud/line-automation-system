@@ -48,7 +48,11 @@ const RULES = [
 // 有無で判定する。ステージだけで見ると S5_注文番号待ち の方(まだ注文していない)が
 // 提供後扱いになって無制限に催促され、逆に 対応保留 の方(実は到着済み)が
 // 提供前扱いになってしまう — 2026-10-21の検証で両方のズレが見つかったため。
-const isProvisioned = (r) => !!(r.order_number || r.shipped_at || r.arrived_at);
+// 注文番号がスクリーンショットだけで共有され、画像からの読み取りに失敗すると
+// 3項目すべてが空のまま残る。その場合でも S6(到着連絡)以降まで進んでいれば
+// 商品は確実に手元にあるため、ステージを補助的な証拠として扱う
+// (S5_注文番号待ち は本当に注文前の可能性があるので含めない)
+const isProvisioned = (r) => !!(r.order_number || r.shipped_at || r.arrived_at) || /^S[6-9]_/.test(r.stage || '');
 const PRE_MAX = 2;
 const PRE_FIRST_DAYS = 5;
 const PRE_SECOND_DAYS = 14;
