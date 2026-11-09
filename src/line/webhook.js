@@ -70,23 +70,28 @@ async function handleImage(event) {
   const userId = event.source.userId;
   const userName = await getUserName(userId);
   logger.info(`Received image from ${userName}`);
-  let imageBase64 = null, mediaType = 'image/jpeg';
+  let imageBase64 = null, mediaType = 'image/jpeg', savedName = null;
   try {
     const stream = await blobClient.getMessageContent(event.message.id);
     const chunks = [];
     for await (const chunk of stream) chunks.push(chunk);
     const buf = Buffer.concat(chunks);
-    // Claude APIの画像サイズ上限に配慮(5MB超はスキップして通知のみ)
-    if (buf.length <= 4.5 * 1024 * 1024) {
-      imageBase64 = buf.toString('base64');
-      if (buf[0] === 0x89 && buf[1] === 0x50) mediaType = 'image/png';
-    } else {
-      logger.warn(`Image too large (${buf.length} bytes), skipping analysis`);
-    }
+    if (buf[0] === 0x89 && buf[1] === 0x50) mediaType = 'image/png';
+    // 承認画面でそのまま見られるように保存する。これが無いと本人確認のスクリーンショットや
+    // 注文完了画面を確認するために公式LINEを開く必要があり、承認画面だけで完結しない
+    try {
+      const dir = path.join(__dirname, '../../data/images');
+      fs.mkdirSync(dir, { recursive: true });
+      savedName = `${event.message.id}.${mediaType === 'image/png' ? 'png' : 'jpg'}`;
+      fs.writeFileSync(path.join(dir, savedName), buf);
+    } catch (e) { logger.error('画像の保存に失敗:', e.message); }
+    // Claude APIの画像サイズ上限に配慮(5MB超は解析だけ見送る。保存は済んでいる)
+    if (buf.length <= 4.5 * 1024 * 1024) imageBase64 = buf.toString('base64');
+    else logger.warn(`Image too large (${buf.length} bytes), skipping analysis`);
   } catch (e) { logger.error('Image download failed:', e.message); }
   await approvalFlow.handleMessage({
     userId, userName,
-    messageText: '[画像を受信しました]',
+    messageText: `[画像を受信しました${savedName ? ':' + savedName : ''}]`,
     image: imageBase64 ? { base64: imageBase64, mediaType } : null,
   });
 }

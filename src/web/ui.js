@@ -2,6 +2,8 @@
 // 既存のTelegram承認と同じ状態(pendingApprovals)を共有するので、どちらで処理しても整合する。
 // 認証はPIN+署名クッキー。PIN未設定(APPROVAL_UI_PIN)のときは画面ごと無効になる。
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const logger = require('../utils/logger');
 
 const PIN = (process.env.APPROVAL_UI_PIN || '').trim();
@@ -55,6 +57,7 @@ header a{color:var(--sub);text-decoration:none;font-size:22px;line-height:1}
 .prov{background:#fffbe6;border:1px solid #fde68a;border-radius:10px;padding:8px 10px;font-size:11px;line-height:1.6;margin-bottom:10px;white-space:pre-wrap}
 .msg{display:flex;margin-bottom:10px;align-items:flex-end;gap:6px}
 .msg.out{flex-direction:row-reverse}
+.ph{max-width:100%;border-radius:10px;display:block}
 .bub{max-width:76%;padding:9px 12px;border-radius:16px;font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word;background:var(--card)}
 .msg.out .bub{background:var(--me)}
 .tm{font-size:10px;color:#4b5563;margin-bottom:2px;white-space:nowrap}
@@ -124,7 +127,14 @@ function setup(app, approvalFlow) {
   // 会話画面: LINEと同じ見え方で全履歴+送信待ちの返信案
   app.get('/ui/t/:userId', guard, (req, res) => {
     const t = ui.thread(req.params.userId);
-    const msgs = t.msgs.map((m) => `<div class="msg ${m.dir === 'incoming' ? 'in' : 'out'}"><div class="bub">${esc(m.text)}</div><div class="tm">${jst(m.at)}</div></div>`).join('');
+    // 受信画像はそのまま吹き出しに出す(公式LINEを開かずに判断できるように)
+    const bubble = (text) => {
+      const m = String(text).match(/^\[画像を受信しました:([A-Za-z0-9._-]+)\]$/);
+      if (m) return `<a href="/ui/img/${encodeURIComponent(m[1])}" target="_blank"><img class="ph" src="/ui/img/${encodeURIComponent(m[1])}" loading="lazy"></a>`;
+      if (/^\[画像を受信しました\]$/.test(text)) return '<span class="sub">[画像(保存前のため表示できません)]</span>';
+      return esc(text);
+    };
+    const msgs = t.msgs.map((m) => `<div class="msg ${m.dir === 'incoming' ? 'in' : 'out'}"><div class="bub">${bubble(m.text)}</div><div class="tm">${jst(m.at)}</div></div>`).join('');
     const pend = t.pending ? `<div class="pend" id="pend" data-id="${esc(t.pending.id)}">
       <h3>📝 送信待ちの返信案(まだ送っていません)</h3>
       <div class="draft" id="draft">${esc(t.pending.reply)}</div>
@@ -158,6 +168,17 @@ function setup(app, approvalFlow) {
       window.scrollTo(0,document.body.scrollHeight);
     </script>`;
     res.type('html').send(page(t.name, body, js));
+  });
+
+  // 受信画像の配信(ログイン必須。ファイル名は英数字のみ許可する)
+  app.get('/ui/img/:name', guard, (req, res) => {
+    const name = String(req.params.name || '');
+    if (!/^[A-Za-z0-9._-]+$/.test(name) || name.includes('..')) return res.status(400).end();
+    const p = path.join(__dirname, '../../data/images', name);
+    if (!fs.existsSync(p)) return res.status(404).end();
+    res.type(name.endsWith('.png') ? 'image/png' : 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    fs.createReadStream(p).pipe(res);
   });
 
   app.post('/ui/api/act', guardApi, express_json, async (req, res) => {
