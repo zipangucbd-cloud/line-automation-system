@@ -16,6 +16,7 @@ async function main() {
     saveApproval: dbModule.saveApproval,
     updateApproval: dbModule.updateApproval,
     listPendingApprovals: dbModule.listPendingApprovals,
+    expireOldApprovals: dbModule.expireOldApprovals,
     listUnansweredUsers: dbModule.listUnansweredUsers,
     getLastIncoming: dbModule.getLastIncoming,
     listRecentCustomers: dbModule.listRecentCustomers,

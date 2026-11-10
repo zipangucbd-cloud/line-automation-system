@@ -26,6 +26,15 @@ function authed(req) {
   const m = raw.match(new RegExp(COOKIE + '=([^;]+)'));
   try { return m ? valid(decodeURIComponent(m[1])) : false; } catch (e) { return false; }
 }
+// 「3時間待ち」「2日待ち」のように、どれだけ待たせているかを一目で分かるようにする
+function waited(ts) {
+  if (!ts) return '';
+  const m = Math.floor((Date.now() - new Date(String(ts).replace(' ', 'T') + 'Z').getTime()) / 60000);
+  if (isNaN(m) || m < 0) return '';
+  if (m < 60) return `${m}分待ち`;
+  if (m < 60 * 24) return `${Math.floor(m / 60)}時間待ち`;
+  return `${Math.floor(m / 1440)}日待ち`;
+}
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -82,10 +91,10 @@ textarea{width:100%;border:1px solid var(--line);border-radius:10px;padding:10px
 .ok.on{opacity:.92}
 `;
 
-const page = (title, body, extra = '') => `<!doctype html><html lang="ja"><head><meta charset="utf-8">
+const page = (title, body, extra = '', bodyAttr = '') => `<!doctype html><html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes"><title>${esc(title)}</title>
-<style>${CSS}</style></head><body>${body}<div class="ok" id="ok"></div>${extra}</body></html>`;
+<style>${CSS}</style></head><body${bodyAttr}>${body}<div class="ok" id="ok"></div>${extra}</body></html>`;
 
 function setup(app, approvalFlow) {
   if (!PIN) { logger.info('承認画面: APPROVAL_UI_PIN 未設定のため無効'); return; }
@@ -122,9 +131,17 @@ function setup(app, approvalFlow) {
   app.get('/ui', guard, (req, res) => {
     const rows = ui.inbox();
     const n = rows.filter((r) => r.pending).length;
-    const body = `<header><div class="t">承認待ち ${n}件<div class="sub">タップで会話を開く</div></div><a href="/ui" title="更新">↻</a></header>
+    const pend = rows.filter((r) => r.pending);
+    const reply = pend.filter((r) => r.kind !== 'followup').length;
+    const prop = pend.length - reply;
+    const oldest = pend.length ? waited(pend[0].lastAt) : '';
+    const done = /(^|[?&])done=1/.test(req.url || '');
+    const summary = n
+      ? `対応待ち ${n}件<div class="sub">返信 ${reply}件${prop ? ` / 提案 ${prop}件` : ''}${oldest ? ` ・ 最長 ${oldest}` : ''} — 古い順</div>`
+      : `対応待ちはありません<div class="sub">${done ? 'すべて対応し終わりました' : '新しいメッセージが届くとここに出ます'}</div>`;
+    const body = `<header><div class="t">${summary}</div><a href="/ui" title="更新">↻</a></header>
     <div class="list">${rows.length ? rows.map((r) => `<a class="row ${r.pending ? 'p' : ''}" href="/ui/t/${encodeURIComponent(r.userId)}">
-      <div class="n">${esc(r.name)}${r.pending ? `<span class="badge">${r.kind === 'followup' ? '提案' : '要対応'}</span>` : ''}${r.stage ? `<span class="badge g">${esc(r.stage)}</span>` : ''}</div>
+      <div class="n">${esc(r.name)}${r.pending ? `<span class="badge">${r.kind === 'followup' ? '提案' : '要対応'}</span>` : ''}${r.pending && waited(r.lastAt) ? `<span class="badge g">${waited(r.lastAt)}</span>` : ''}${r.stage ? `<span class="badge g">${esc(r.stage)}</span>` : ''}</div>
       <div class="m">${r.lastDir === 'incoming' ? '' : '↩ '}${esc(r.lastText)}${r.lastAt ? ` ・ ${jst(r.lastAt)}` : ''}</div></a>`).join('') : '<div class="empty">まだ会話がありません</div>'}</div>`;
     res.type('html').send(page('承認画面', body, '<script>setTimeout(()=>location.reload(),20000)</script>'));
   });
@@ -150,7 +167,8 @@ function setup(app, approvalFlow) {
       <div id="fb" style="display:none"><textarea id="fbt" rows="2" placeholder="例: もっと短く / URLはこれ https://… / 選択させずクリームで確定"></textarea>
       <div class="btns"><button class="s" onclick="act('revise')">この指示で作り直す</button></div></div>
     </div>` : '<div class="pend"><div class="sub" style="text-align:center">送信待ちの返信案はありません(すべて対応済み)</div></div>';
-    const body = `<header><a href="/ui">‹</a><div class="t">${esc(t.name)}<div class="sub">${esc(t.stage || '')}</div></div></header>
+    const left = ui.inbox().filter((r) => r.pending).length;
+    const body = `<header><a href="/ui">‹</a><div class="t">${esc(t.name)}<div class="sub">${esc(t.stage || '')}${left ? ` ・ 残り${left}件` : ''}</div></div></header>
     <div class="chat">${t.prov ? `<div class="prov">${esc(t.prov)}</div>` : ''}${msgs || '<div class="empty">履歴なし</div>'}</div>${pend}`;
     const js = `<script>
       const ok=document.getElementById('ok');
@@ -167,7 +185,12 @@ function setup(app, approvalFlow) {
         toast(action==='revise'?'作り直しています…(30秒ほど)':'処理中…');
         try{
           const r=await fetch('/ui/api/act',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,id:p.dataset.id,text})}).then(x=>x.json());
-          if(r.ok){toast(action==='approve'?'✅ 送信しました':action==='revise'?'🔄 作り直しました':'❌ 却下しました');setTimeout(()=>location.reload(),700)}
+          if(r.ok){
+            toast(action==='approve'?'✅ 送信しました':action==='revise'?'🔄 作り直しました':'❌ 却下しました');
+            // 作り直しは同じ画面で確認し、送信・却下が済んだら次の対応待ちへ自動で進む
+            const nx=document.body.dataset.next;
+            setTimeout(()=>{ if(action==='revise') location.reload(); else if(nx) location.href='/ui/t/'+nx; else location.href='/ui?done=1'; },700);
+          }
           else{toast('⚠️ '+(r.error||'失敗しました'));busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
         }catch(e){toast('⚠️ 通信に失敗しました');busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
       }
@@ -182,7 +205,7 @@ function setup(app, approvalFlow) {
       setInterval(()=>{if(!busy&&document.getElementById('fb')&&document.getElementById('fb').style.display==='none')location.reload()},30000);
       window.scrollTo(0,document.body.scrollHeight);
     </script>`;
-    res.type('html').send(page(t.name, body, js));
+    res.type('html').send(page(t.name, body, js, t.next ? ` data-next="${esc(t.next)}"` : ''));
   });
 
   // 受信画像の配信(ログイン必須。ファイル名は英数字のみ許可する)

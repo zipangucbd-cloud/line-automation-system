@@ -202,6 +202,14 @@ function listUnansweredUsers() {
     GROUP BY user_id`).all().filter((r) => r.last_in > r.last_out);
 }
 
+// 再発行の対象は直近3日のみのため、それより古いpendingは永久に残り続ける。
+// 「対応待ち◯件」が実態と合わなくなり、見落としの判断を誤らせるので期限切れにする
+function expireOldApprovals(days = 7) {
+  const r = db.prepare(`UPDATE approvals SET status = 'expired', resolved_at = CURRENT_TIMESTAMP
+    WHERE status = 'pending' AND created_at < datetime('now', ?)`).run(`-${days} days`);
+  return r.changes;
+}
+
 // 再起動後の再発行用: 直近days日のpendingカードを列挙する
 function listPendingApprovals(days = 3) {
   return db.prepare(`SELECT approval_id, user_id, generated_reply, created_at, tg_msg_id FROM approvals WHERE status = 'pending' AND created_at >= datetime('now', ?)`).all(`-${days} days`);
@@ -227,4 +235,4 @@ function linkWinnersByXHandle() {
   return r.changes;
 }
 
-module.exports = { findCustomerByXHandle, linkWinnersByXHandle, listPendingApprovals, listUnansweredUsers, listRecentCustomers, saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };
+module.exports = { expireOldApprovals, findCustomerByXHandle, linkWinnersByXHandle, listPendingApprovals, listUnansweredUsers, listRecentCustomers, saveWinnerEvaluation, getWinnerByLineUser, listReviewedWinners, applyWinnerEvents, addWinner, listActiveWinners, winnerDashboard, autoCompleteWinners, completeWinnerByXid, linkTelegramMessage, findApprovalByTgMsg, getLastIncoming, saveKnowledgeGap, resolveKnowledgeGaps, listKnowledgeGaps, initDb, getCustomer, upsertCustomer, getRecentConversations, saveConversation, saveApproval, updateApproval, findWinnerByXid, findWinnerByLineUser, linkWinnerToLine };

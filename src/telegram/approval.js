@@ -1031,6 +1031,11 @@ async function checkTelegramPolling() {
 // 2) 受信から20分〜3時間、返信もカードも無い相手 → 会話履歴から生成をやり直す(最大2回、以後は🚨警告)
 const regenAttempts = new Map(); // userId -> 試行回数
 async function reconcile() {
+  // 期限切れのまま残った古い承認待ちを片付ける(件数を実態に合わせるため)
+  try {
+    const n = deps.expireOldApprovals ? deps.expireOldApprovals(7) : 0;
+    if (n) logger.info(`古い承認待ち${n}件を期限切れにしました`);
+  } catch (e) { logger.error('Reconcile(expire) failed:', e.message); }
   // 顧客側にX IDがあるのに当選者と未接続のものを繋ぐ(進捗表示・フォローアップが効くように)
   try {
     const n = deps.linkWinnersByXHandle ? deps.linkWinnersByXHandle() : 0;
@@ -1131,7 +1136,13 @@ const ui = {
       const c = deps.getCustomer(userId) || {};
       out.push({ userId, name: cardName(userId, c.display_name || pend.p.userName || 'お客様'), stage: c.stage || '', lastText: '(フォローアップ提案)', lastAt: '', lastDir: '', pending: true, kind: 'followup' });
     }
-    out.sort((a, b) => (b.pending - a.pending) || String(b.lastAt || '').localeCompare(String(a.lastAt || '')));
+    // 対応待ちは「長く待っている順」に並べる。新着が上に積まれると古い依頼が埋もれて
+    // 対応漏れが起きるため(まとめて返信するときに効く)
+    out.sort((a, b) => {
+      if (a.pending !== b.pending) return b.pending - a.pending;
+      if (a.pending) return String(a.lastAt || '').localeCompare(String(b.lastAt || ''));
+      return String(b.lastAt || '').localeCompare(String(a.lastAt || ''));
+    });
     return out;
   },
 
@@ -1152,7 +1163,15 @@ const ui = {
       const w = deps.findWinnerByLineUser && deps.findWinnerByLineUser(userId);
       if (w) prov = offerStatusLine(w);
     } catch (e) {}
-    return { userId, name: cardName(userId, c.display_name || 'お客様'), stage: c.stage || '', prov, msgs, pending };
+    // 1件終えたら次へ送るため、別の対応待ちを1人返す(戻って選び直す手間と漏れをなくす)
+    let next = null;
+    let nextAt = null;
+    for (const [, p] of pendingApprovals.entries()) {
+      if (p.userId === userId) continue;
+      const at = p.lastMsgAt || 0;
+      if (next === null || at < nextAt) { next = p.userId; nextAt = at; }
+    }
+    return { userId, name: cardName(userId, c.display_name || 'お客様'), stage: c.stage || '', prov, msgs, pending, next };
   },
 
   // 承認して送信(Telegram側のカードも「送信済み」に書き換えて二重送信を防ぐ)
