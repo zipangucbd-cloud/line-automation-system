@@ -3,7 +3,22 @@
 
 const PLACEHOLDER = /^[_＿\-ー―—\s]*$/;
 
-const { negativeInfo } = require('./negative_list');
+const { negativeInfo, provisionInfo } = require('./negative_list');
+
+// 過去にお取引のある方なら、何をいつ提供して評価がどうだったかを思い出せるようにする。
+// これが無いと、再提供や本番アカウントからの移行で「初めての人」として応対してしまう
+function pastNote(xId) {
+  const p = provisionInfo(xId);
+  if (!p || !(p.count > 0 || (p.history && p.history.length))) return '';
+  const lines = ['\n【この方の過去のお取引】通算' + (p.count || 0) + '回提供'];
+  if (p.first || p.last) lines.push(`期間: ${p.first || '?'} 〜 ${p.last || '?'}`);
+  if (p.history && p.history.length) lines.push(`履歴: ${p.history.join(' → ')}`);
+  if (p.products && p.products.length) lines.push(`提供済みの商品: ${p.products.join('・')}(同じ商品を重ねて提供しないよう注意)`);
+  if (p.pos || p.neg) lines.push(`評価: ポジティブ${p.pos || 0}回 / ネガティブ${p.neg || 0}回`);
+  if (p.followers || p.genre) lines.push(`参考: ${[p.followers, p.genre].filter(Boolean).join(' / ')}`);
+  lines.push('※初めてのお客様ではありません。過去のやり取りを踏まえて応対してください(ただし履歴を細かく読み上げない)');
+  return lines.join('\n');
+}
 // 過去に「良くない」評価がある人なら、照合コンテキストに警告を足す
 function negNote(xId) {
   const n = negativeInfo(xId);
@@ -66,7 +81,7 @@ function buildWinnerContext({ deps, messageText, customer, userId }) {
   // 既にLINEユーザーへ紐付け済みの当選者がいれば最優先
   const linked = deps.findWinnerByLineUser(userId);
   if (linked) {
-    return `照合OK(紐付け済み): @${linked.x_id} は「${linked.campaign}」の当選者です。提供内容: ${linked.offer} / 区分: ${linked.tier} / 状態: ${linked.status}${linked.chosen_product ? ' / 選択商品: ' + linked.chosen_product : ''}。この企画・提供内容に沿ってフローを進めてください。\n${offerStatusLine(linked)}${negNote(linked.x_id)}`;
+    return `照合OK(紐付け済み): @${linked.x_id} は「${linked.campaign}」の当選者です。提供内容: ${linked.offer} / 区分: ${linked.tier} / 状態: ${linked.status}${linked.chosen_product ? ' / 選択商品: ' + linked.chosen_product : ''}。この企画・提供内容に沿ってフローを進めてください。\n${offerStatusLine(linked)}${pastNote(linked.x_id)}${negNote(linked.x_id)}`;
   }
 
   const ids = extractSnsIds(messageText);
@@ -79,12 +94,20 @@ function buildWinnerContext({ deps, messageText, customer, userId }) {
     if (winner) {
       deps.linkWinnerToLine({ winnerId: winner.id, lineUserId: userId });
       deps.upsertCustomer({ userId, xHandle: claimed });
-      return `照合OK: 申告ID @${claimed} は「${winner.campaign}」の当選者リストに登録されています。提供内容: ${winner.offer} / 区分: ${winner.tier}。本人確認(プロフィールのスクリーンショット)が未完了ならS2を先に行い、完了後にこの提供内容でフローを進めてください。\n${offerStatusLine(winner)}${negNote(winner.x_id)}`;
+      return `照合OK: 申告ID @${claimed} は「${winner.campaign}」の当選者リストに登録されています。提供内容: ${winner.offer} / 区分: ${winner.tier}。本人確認(プロフィールのスクリーンショット)が未完了ならS2を先に行い、完了後にこの提供内容でフローを進めてください。\n${offerStatusLine(winner)}${pastNote(winner.x_id)}${negNote(winner.x_id)}`;
     }
   }
 
   const shown = [ids.x ? `X: @${ids.x}` : null, ids.instagram ? `Instagram: @${ids.instagram}` : null]
     .filter(Boolean).join(' / ') || `@${candidates[0]}`;
+  // 当選者リストに無くても、過去にお取引があれば「初めての人」として扱わない
+  for (const claimed of candidates) {
+    const past = pastNote(claimed);
+    if (past) {
+      deps.upsertCustomer({ userId, xHandle: claimed });
+      return `照合: 申告ID @${claimed} は今回の当選者リストには載っていませんが、過去にお取引のある方です。${past}\n新しい企画の当選者ではないため、提供の案内に進む前に運営の確認が必要です。返信案の冒頭に[要人間判断]を付けてください。`;
+    }
+  }
   return `照合NG: 申告されたID(${shown})は当選者リストに未登録です。提供案内には進まず、返信案の冒頭に「[要人間判断] 当選者リスト未登録のID申告」を付けて保留してください。`;
 }
 

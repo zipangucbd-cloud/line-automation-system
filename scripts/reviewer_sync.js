@@ -344,7 +344,20 @@ async function fetchRetry(url, opts = {}, tries = 4) {
     const provisions = {};
     for (const [xid, p] of people) {
       const dates = [...p.blockDates.filter(Boolean), ...p.giftDates].sort();
-      if (p.given > 0 || dates.length) provisions[xid] = { name: p.name || '', count: p.given, last: dates[dates.length - 1] || null };
+      if (p.given > 0 || dates.length) provisions[xid] = {
+        name: p.name || '',
+        count: p.given,
+        last: dates[dates.length - 1] || null,
+        first: dates[0] || null,
+        // 「何をいつ提供して、どう評価されたか」をBotが会話で思い出せるようにする
+        history: p.history.slice(0, 6),
+        products: [...p.prods],
+        pos: p.evals.filter((e) => POS.has(e)).length,
+        neg: p.evals.filter((e) => e === '良くない').length,
+        channel: p.channel || '',
+        genre: p.genre || '',
+        followers: p.fol || '',
+      };
     }
     fs.writeFileSync(path.join(__dirname, '../data/sheet_provisions.json'),
       JSON.stringify({ updatedAt: new Date().toISOString(), count: Object.keys(provisions).length, people: provisions }));
