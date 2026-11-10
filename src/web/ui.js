@@ -63,7 +63,12 @@ header a{color:var(--sub);text-decoration:none;font-size:22px;line-height:1}
 .tm{font-size:10px;color:#4b5563;margin-bottom:2px;white-space:nowrap}
 .pend{background:#fff;border-top:3px solid var(--accent);padding:14px;position:sticky;bottom:0;box-shadow:0 -4px 18px rgba(0,0,0,.12)}
 .pend h3{margin:0 0 8px;font-size:12px;color:var(--accent)}
-.draft{background:#f9fafb;border:1px dashed #9ca3af;border-radius:12px;padding:12px;font-size:14px;line-height:1.6;white-space:pre-wrap;max-height:38vh;overflow:auto}
+.draft{background:#f9fafb;border:1px dashed #9ca3af;border-radius:12px;padding:12px;font-size:14px;line-height:1.6;white-space:pre-wrap;max-height:26vh;overflow:auto}
+.pend.min .foldable{display:none}
+.fold{float:right;font-weight:600;color:#fff;background:var(--sub);border-radius:12px;padding:3px 10px;font-size:11px}
+details.note{margin-top:8px;background:#eef2ff;border-radius:8px;padding:6px 10px;font-size:11px;color:#3730a3}
+details.note summary{cursor:pointer;font-weight:700;list-style:none}
+details.note>div{margin-top:6px;white-space:pre-wrap}
 .note{margin-top:8px;background:#eef2ff;border-radius:8px;padding:8px 10px;font-size:11px;color:#3730a3;white-space:pre-wrap}
 .btns{display:flex;gap:8px;margin-top:10px}
 button{flex:1;padding:14px 8px;border:0;border-radius:12px;font-size:15px;font-weight:700;color:#fff;background:var(--accent)}
@@ -136,9 +141,11 @@ function setup(app, approvalFlow) {
     };
     const msgs = t.msgs.map((m) => `<div class="msg ${m.dir === 'incoming' ? 'in' : 'out'}"><div class="bub">${bubble(m.text)}</div><div class="tm">${jst(m.at)}</div></div>`).join('');
     const pend = t.pending ? `<div class="pend" id="pend" data-id="${esc(t.pending.id)}">
-      <h3>📝 送信待ちの返信案(まだ送っていません)</h3>
-      <div class="draft" id="draft">${esc(t.pending.reply)}</div>
-      ${t.pending.internalNote ? `<div class="note">🗒 Botメモ(送信されません): ${esc(t.pending.internalNote)}</div>` : ''}
+      <h3>📝 送信待ちの返信案<span class="fold" id="foldBtn">たたむ ▼</span></h3>
+      <div class="foldable" id="foldable">
+        <div class="draft" id="draft">${esc(t.pending.reply)}</div>
+        ${t.pending.internalNote ? `<details class="note"><summary>🗒 Botメモ(送信されません) — タップで表示</summary><div>${esc(t.pending.internalNote)}</div></details>` : ''}
+      </div>
       <div class="btns"><button id="ok-btn" onclick="act('approve')">✅ 承認して送信</button><button class="s" onclick="toggle()">✏️ 修正</button><button class="d" onclick="act('reject')">❌ 却下</button></div>
       <div id="fb" style="display:none"><textarea id="fbt" rows="2" placeholder="例: もっと短く / URLはこれ https://… / 選択させずクリームで確定"></textarea>
       <div class="btns"><button class="s" onclick="act('revise')">この指示で作り直す</button></div></div>
@@ -148,7 +155,7 @@ function setup(app, approvalFlow) {
     const js = `<script>
       const ok=document.getElementById('ok');
       function toast(t){ok.textContent=t;ok.classList.add('on');setTimeout(()=>ok.classList.remove('on'),2200)}
-      function toggle(){const f=document.getElementById('fb');f.style.display=f.style.display==='none'?'block':'none';if(f.style.display==='block')document.getElementById('fbt').focus()}
+      function toggle(){const f=document.getElementById('fb');f.style.display=f.style.display==='none'?'block':'none';if(f.style.display==='block')document.getElementById('fbt').focus();if(typeof fit==='function')fit();}
       let busy=false;
       async function act(action){
         if(busy)return; const p=document.getElementById('pend'); if(!p)return;
@@ -164,6 +171,14 @@ function setup(app, approvalFlow) {
           else{toast('⚠️ '+(r.error||'失敗しました'));busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
         }catch(e){toast('⚠️ 通信に失敗しました');busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
       }
+      // 返信案が画面を覆って会話が読めなくなるのを防ぐ。
+      // 会話の下に返信案の高さ分の余白を作り、最新のやり取りが必ず見えるようにする
+      function fit(){const p=document.getElementById('pend');const c=document.querySelector('.chat');if(!p||!c)return;c.style.paddingBottom=(p.offsetHeight+16)+'px';}
+      const fb_=document.getElementById('foldBtn');
+      if(fb_)fb_.addEventListener('click',()=>{const p=document.getElementById('pend');p.classList.toggle('min');fb_.textContent=p.classList.contains('min')?'ひらく ▲':'たたむ ▼';fit();window.scrollTo(0,document.body.scrollHeight);});
+      const nt_=document.querySelector('details.note');
+      if(nt_)nt_.addEventListener('toggle',()=>{fit();});
+      fit();window.addEventListener('resize',fit);
       setInterval(()=>{if(!busy&&document.getElementById('fb')&&document.getElementById('fb').style.display==='none')location.reload()},30000);
       window.scrollTo(0,document.body.scrollHeight);
     </script>`;
