@@ -1136,13 +1136,8 @@ const ui = {
       const c = deps.getCustomer(userId) || {};
       out.push({ userId, name: cardName(userId, c.display_name || pend.p.userName || 'お客様'), stage: c.stage || '', lastText: '(フォローアップ提案)', lastAt: '', lastDir: '', pending: true, kind: 'followup' });
     }
-    // 対応待ちは「長く待っている順」に並べる。新着が上に積まれると古い依頼が埋もれて
-    // 対応漏れが起きるため(まとめて返信するときに効く)
-    out.sort((a, b) => {
-      if (a.pending !== b.pending) return b.pending - a.pending;
-      if (a.pending) return String(a.lastAt || '').localeCompare(String(b.lastAt || ''));
-      return String(b.lastAt || '').localeCompare(String(a.lastAt || ''));
-    });
+    // 対応待ちを上に、その中は新しい順(大塚さんの指定)
+    out.sort((a, b) => (b.pending - a.pending) || String(b.lastAt || '').localeCompare(String(a.lastAt || '')));
     return out;
   },
 

@@ -134,10 +134,11 @@ function setup(app, approvalFlow) {
     const pend = rows.filter((r) => r.pending);
     const reply = pend.filter((r) => r.kind !== 'followup').length;
     const prop = pend.length - reply;
-    const oldest = pend.length ? waited(pend[0].lastAt) : '';
+    const oldestAt = pend.map((r) => r.lastAt).filter(Boolean).sort()[0];
+    const oldest = oldestAt ? waited(oldestAt) : '';
     const done = /(^|[?&])done=1/.test(req.url || '');
     const summary = n
-      ? `対応待ち ${n}件<div class="sub">返信 ${reply}件${prop ? ` / 提案 ${prop}件` : ''}${oldest ? ` ・ 最長 ${oldest}` : ''} — 古い順</div>`
+      ? `対応待ち ${n}件<div class="sub">返信 ${reply}件${prop ? ` / 提案 ${prop}件` : ''}${oldest ? ` ・ 最長 ${oldest}` : ''}</div>`
       : `対応待ちはありません<div class="sub">${done ? 'すべて対応し終わりました' : '新しいメッセージが届くとここに出ます'}</div>`;
     const body = `<header><div class="t">${summary}</div><a href="/ui" title="更新">↻</a></header>
     <div class="list">${rows.length ? rows.map((r) => `<a class="row ${r.pending ? 'p' : ''}" href="/ui/t/${encodeURIComponent(r.userId)}">
@@ -185,12 +186,7 @@ function setup(app, approvalFlow) {
         toast(action==='revise'?'作り直しています…(30秒ほど)':'処理中…');
         try{
           const r=await fetch('/ui/api/act',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,id:p.dataset.id,text})}).then(x=>x.json());
-          if(r.ok){
-            toast(action==='approve'?'✅ 送信しました':action==='revise'?'🔄 作り直しました':'❌ 却下しました');
-            // 作り直しは同じ画面で確認し、送信・却下が済んだら次の対応待ちへ自動で進む
-            const nx=document.body.dataset.next;
-            setTimeout(()=>{ if(action==='revise') location.reload(); else if(nx) location.href='/ui/t/'+nx; else location.href='/ui?done=1'; },700);
-          }
+          if(r.ok){toast(action==='approve'?'✅ 送信しました':action==='revise'?'🔄 作り直しました':'❌ 却下しました');setTimeout(()=>location.reload(),700)}
           else{toast('⚠️ '+(r.error||'失敗しました'));busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
         }catch(e){toast('⚠️ 通信に失敗しました');busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false)}
       }
