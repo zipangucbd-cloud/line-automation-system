@@ -154,7 +154,9 @@ function setup(app, approvalFlow) {
     const bubble = (text) => {
       const m = String(text).match(/^\[画像を受信しました:([A-Za-z0-9._-]+)\]$/);
       if (m) return `<a href="/ui/img/${encodeURIComponent(m[1])}" target="_blank"><img class="ph" src="/ui/img/${encodeURIComponent(m[1])}" loading="lazy"></a>`;
-      if (/^\[画像を受信しました\]$/.test(text)) return '<span class="sub">[画像(保存前のため表示できません)]</span>';
+      // 画像の保存は2026-11-09に始めたため、それ以前の分は残っていない。
+      // 不具合と誤解されないよう理由を明示する
+      if (/^\[画像を受信しました\]$/.test(text)) return '<span class="sub">🖼 画像(11/9より前に届いたため保存されていません)<br>確認が必要なら chat.line.biz をご覧ください</span>';
       return esc(text);
     };
     const msgs = t.msgs.map((m) => `<div class="msg ${m.dir === 'incoming' ? 'in' : 'out'}"><div class="bub">${bubble(m.text)}</div><div class="tm">${jst(m.at)}</div></div>`).join('');
